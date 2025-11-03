@@ -76,7 +76,7 @@ typedef struct ProtoPCIemState
     SysBusDevice parent_obj;
 
     MemoryRegion iomem;
-    CharBackend chr;
+    CharFrontend chr;
     QEMUTimer *poll_timer;
 
     uint8_t recv_buf[sizeof(ProtoPciemMessage)];

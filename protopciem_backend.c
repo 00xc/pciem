@@ -1,14 +1,14 @@
-#include "hw/misc/protopciem_backend.h"
+#include "qemu/osdep.h"
 #include "hw/irq.h"
 #include "hw/qdev-properties-system.h"
 #include "hw/qdev-properties.h"
 #include "hw/sysbus.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
-#include "qemu/osdep.h"
 #include "qemu/timer.h"
 #include "ui/console.h"
 #include "ui/pixel_ops.h"
+#include "hw/misc/protopciem_backend.h"
 
 static void gpu_draw_pixel(ProtoPCIemState *s, int x, int y, uint8_t r, uint8_t g, uint8_t b)
 {
