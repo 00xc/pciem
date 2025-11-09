@@ -1140,48 +1140,88 @@ static int __init pciem_init(void)
 
             pr_info("init: BAR%d using pre-carved region [0x%llx-0x%llx]", i, (u64)start, (u64)end);
 
-            mem_res = kzalloc(sizeof(*mem_res), GFP_KERNEL);
-            if (!mem_res)
-            {
-                rc = -ENOMEM;
-                goto fail_bars;
+            struct resource *r = iomem_resource.child;
+            struct resource *found = NULL;
+            struct resource *parent = NULL;
+
+            while (r) {
+                if ((r->flags & IORESOURCE_MEM) && r->start <= start && r->end >= end) {
+                    struct resource *c = r->child;
+                    while (c) {
+                        if ((c->flags & IORESOURCE_MEM) && c->start == start && c->end == end) {
+                            found = c;
+                            break;
+                        }
+                        c = c->sibling;
+                    }
+
+                    if (found)
+                    {
+                        break;
+                    }
+
+                    if (!parent || (r->start >= parent->start && r->end <= parent->end))
+                    {
+                        parent = r;
+                    }
+                }
+                r = r->sibling;
             }
 
-            mem_res->name = kasprintf(GFP_KERNEL, "PCI BAR%d", i);
-            if (!mem_res->name)
-            {
-                kfree(mem_res);
-                rc = -ENOMEM;
-                goto fail_bars;
+            if (found && found->start == start && found->end == end) {
+                pr_info("init: BAR%d found existing iomem resource: %s [0x%llx-0x%llx]",
+                        i, found->name ? found->name : "<unnamed>", (u64)found->start, (u64)found->end);
+                bar->allocated_res = found;
+                bar->mem_owned_by_framework = false;
+                bar->phys_addr = start;
+                bar->virt_addr = NULL;
+                bar->pages = NULL;
+            } else {
+                mem_res = kzalloc(sizeof(*mem_res), GFP_KERNEL);
+                if (!mem_res) {
+                    rc = -ENOMEM;
+                    goto fail_bars;
+                }
+
+                mem_res->name = kasprintf(GFP_KERNEL, "PCI BAR%d", i);
+                if (!mem_res->name) {
+                    kfree(mem_res);
+                    rc = -ENOMEM;
+                    goto fail_bars;
+                }
+
+                mem_res->start = start;
+                mem_res->end = end;
+                mem_res->flags = IORESOURCE_MEM;
+
+                if (parent) {
+                    pr_info("init: BAR%d inserting into parent resource: %s [0x%llx-0x%llx]",
+                            i, parent->name ? parent->name : "<unnamed>",
+                            (u64)parent->start, (u64)parent->end);
+                    if (request_resource(parent, mem_res)) {
+                        pr_err("init: BAR%d failed to insert into parent resource", i);
+                        kfree(mem_res->name);
+                        kfree(mem_res);
+                        rc = -EBUSY;
+                        goto fail_bars;
+                    }
+                } else {
+                    if (request_resource(&iomem_resource, mem_res)) {
+                        pr_err("init: BAR%d phys region 0x%llx busy (request_resource failed).", i, (u64)start);
+                        kfree(mem_res->name);
+                        kfree(mem_res);
+                        rc = -EBUSY;
+                        goto fail_bars;
+                    }
+                }
+
+                bar->allocated_res = mem_res;
+                bar->mem_owned_by_framework = true;
+                bar->phys_addr = start;
+                bar->virt_addr = NULL;
+                bar->pages = NULL;
+                pr_info("init: BAR%d successfully reserved [0x%llx-0x%llx]", i, (u64)start, (u64)end);
             }
-
-            mem_res->start = start;
-            mem_res->end = end;
-            mem_res->flags = IORESOURCE_MEM;
-
-            if (request_resource(&iomem_resource, mem_res))
-            {
-                pr_err("init: BAR%d phys region 0x%llx busy (request_resource failed).", i, (u64)start);
-                kfree(mem_res->name);
-                kfree(mem_res);
-                rc = -EBUSY;
-                goto fail_bars;
-            }
-
-            bar->allocated_res = mem_res;
-            bar->mem_owned_by_framework = true;
-            bar->phys_addr = start;
-            bar->virt_addr = NULL;
-            bar->pages = NULL;
-
-            pr_info("init: BAR%d successfully reserved [0x%llx-0x%llx]", i, (u64)start, (u64)end);
-        }
-        else
-        {
-            pr_err("init: BAR%d has no physical memory region defined\n", i);
-            pr_err("      Please specify in pciem_phys_regions parameter\n");
-            rc = -EINVAL;
-            goto fail_bars;
         }
     }
 
