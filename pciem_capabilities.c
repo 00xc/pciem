@@ -85,6 +85,7 @@ int pciem_add_cap_msi(struct pciem_host *v, struct pciem_cap_msi_config *cfg)
 
     return 0;
 }
+EXPORT_SYMBOL(pciem_add_cap_msi);
 
 int pciem_add_cap_msix(struct pciem_host *v, struct pciem_cap_msix_config *cfg)
 {
