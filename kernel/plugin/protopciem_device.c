@@ -9,7 +9,7 @@
 #include "pciem_ops.h"
 #include "protopciem_device.h"
 
-MODULE_LICENSE("Dual MIT/GPL");
+MODULE_LICENSE("MIT");
 MODULE_AUTHOR("cakehonolulu (cakehonolulu@protonmail.com)");
 MODULE_DESCRIPTION("ProtoPCIem Device Plugin for PCIem Framework");
 
