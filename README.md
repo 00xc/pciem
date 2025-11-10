@@ -122,12 +122,12 @@ The proxy should run in the background doing the communication between QEMU and 
 
 ## Components
 
-- `pciem_framework.c`: Core framework implementing "virtual PCI host bridge"
-- `pciem_capabilities.c`: PCI capability management (MSI, MSI-X, PM, etc.)
-- `pciem_dma.c`: IOMMU-aware DMA engine
-- `pciem_uproxy.c`: Userspace proxy for QEMU forwarding
-- `protopciem_backend.c`: QEMU device backend implementation
-- `protopciem_device.c`: Example dumb-framebuffer description for PCIem
+- `kernel/framework/pciem_framework.c`: Core framework implementing "virtual PCI host bridge"
+- `kernel/framework/pciem_capabilities.c`: PCI capability management (MSI, MSI-X, PM, etc.)
+- `kernel/framework/pciem_dma.c`: IOMMU-aware DMA engine
+- `userspace/pciem_uproxy.c`: Userspace proxy for QEMU forwarding
+- `qemu/protopciem_backend.c`: QEMU device backend implementation
+- `kernel/plugin/protopciem_device.c`: Example dumb-framebuffer description for PCIem
 
 ## Current Limitations
 
@@ -137,7 +137,7 @@ The proxy should run in the background doing the communication between QEMU and 
 
 ## License
 
-Dual MIT/GPLv2 (pciem_framework.c and protopciem_driver.c)
+Dual MIT/GPLv2 (pciem_framework.c, protopciem_device.c and protopciem_driver.c)
 
 MIT (Rest)
 
