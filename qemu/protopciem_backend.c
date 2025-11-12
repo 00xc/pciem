@@ -1,3 +1,4 @@
+#include "qemu/osdep.h"
 #include "hw/misc/protopciem_backend.h"
 #include "hw/irq.h"
 #include "hw/qdev-properties-system.h"
@@ -5,7 +6,6 @@
 #include "hw/sysbus.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
-#include "qemu/osdep.h"
 #include "qemu/timer.h"
 #include "ui/console.h"
 #include "ui/pixel_ops.h"
