@@ -27,12 +27,15 @@
 #include <linux/vmalloc.h>
 
 #include "pciem_capabilities.h"
+#include "pciem_dma.h"
 #include "pciem_framework.h"
 #include "pciem_ops.h"
 
+#define SHARED_BUF_SIZE (4 * 1024 * 1024)
+
 MODULE_LICENSE("Dual MIT/GPL");
 MODULE_AUTHOR("cakehonolulu (cakehonolulu@protonmail.com)");
-MODULE_DESCRIPTION("Synthetic PCIe device with QEMU forwarding - Multi-BAR Page Fault Framework");
+MODULE_DESCRIPTION("Synthetic PCIe device with QEMU forwarding");
 
 #define DRIVER_NAME "pciem"
 #define CTRL_DEVICE_NAME "pciem_ctrl"
@@ -64,9 +67,16 @@ MODULE_PARM_DESC(pciem_phys_regions,
 
 #define SHIM_DEVICE_NAME "pciem_shim"
 
+struct shim_dma_shared_op
+{
+    __u64 host_phys_addr;
+    __u32 len;
+    __u32 padding;
+};
 #define PCIEM_SHIM_IOC_MAGIC 'R'
 #define PCIEM_SHIM_IOCTL_RAISE_IRQ _IOW(PCIEM_SHIM_IOC_MAGIC, 3, int)
 #define PCIEM_SHIM_IOCTL_LOWER_IRQ _IOW(PCIEM_SHIM_IOC_MAGIC, 4, int)
+#define PCIEM_SHIM_IOCTL_DMA_READ_SHARED _IOW(PCIEM_SHIM_IOC_MAGIC, 6, struct shim_dma_shared_op)
 
 struct shim_dma_read_op
 {
@@ -420,6 +430,26 @@ static long shim_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
         break;
     case PCIEM_SHIM_IOCTL_LOWER_IRQ:
         break;
+    case PCIEM_SHIM_IOCTL_DMA_READ_SHARED: {
+        struct shim_dma_shared_op op;
+
+        if (copy_from_user(&op, (void __user *)arg, sizeof(op)))
+            return -EFAULT;
+
+        if (op.len > v->shared_buf_size)
+        {
+            pr_err("pciem: DMA read len %u > shared buf size\n", op.len);
+            return -EINVAL;
+        }
+
+        int ret = pciem_dma_read_from_guest(v, op.host_phys_addr, v->shared_buf_vaddr, op.len, 0);
+        if (ret < 0)
+        {
+            pr_err("pciem: DMA read shared failed: %d\n", ret);
+            return ret;
+        }
+        s break;
+    }
     case PCIEM_SHIM_IOCTL_DMA_READ: {
         struct shim_dma_read_op op;
         struct iommu_domain *domain;
@@ -489,6 +519,20 @@ static long shim_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
     return 0;
 }
 
+static int shim_mmap(struct file *file, struct vm_area_struct *vma)
+{
+    struct pciem_host *v = file->private_data;
+    unsigned long size = vma->vm_end - vma->vm_start;
+
+    if (size > v->shared_buf_size)
+    {
+        pr_err("pciem: mmap size %lu too large (max %zu)\n", size, v->shared_buf_size);
+        return -EINVAL;
+    }
+
+    return dma_mmap_coherent(&v->protopciem_pdev->dev, vma, v->shared_buf_vaddr, v->shared_buf_dma, size);
+}
+
 static const struct file_operations shim_fops = {
     .owner = THIS_MODULE,
     .open = shim_open,
@@ -498,6 +542,7 @@ static const struct file_operations shim_fops = {
     .poll = shim_poll,
     .unlocked_ioctl = shim_ioctl,
     .compat_ioctl = shim_ioctl,
+    .mmap = shim_mmap,
 };
 
 static int vph_read_config(struct pci_bus *bus, unsigned int devfn, int where, int size, u32 *value)
@@ -730,7 +775,6 @@ static int vph_ctrl_mmap(struct file *file, struct vm_area_struct *vma)
 
     if (bar->intercept_page_faults)
     {
-        
     }
     else
     {
@@ -851,8 +895,7 @@ static int vph_emulator_thread(void *arg)
 
         wait_event_interruptible(v->write_wait,
                                  ((proxy_irq = atomic_xchg(&v->proxy_irq_pending, 0)) ||
-                                  (guest_mmio = atomic_xchg(&v->guest_mmio_pending, 0)) ||
-                                  kthread_should_stop()));
+                                  (guest_mmio = atomic_xchg(&v->guest_mmio_pending, 0)) || kthread_should_stop()));
 
         if (kthread_should_stop())
         {
@@ -941,11 +984,15 @@ static int pciem_complete_init(struct pciem_host *v)
             struct resource *found = NULL;
             struct resource *parent = NULL;
 
-            while (r) {
-                if ((r->flags & IORESOURCE_MEM) && r->start <= start && r->end >= end) {
+            while (r)
+            {
+                if ((r->flags & IORESOURCE_MEM) && r->start <= start && r->end >= end)
+                {
                     struct resource *c = r->child;
-                    while (c) {
-                        if ((c->flags & IORESOURCE_MEM) && c->start == start && c->end == end) {
+                    while (c)
+                    {
+                        if ((c->flags & IORESOURCE_MEM) && c->start == start && c->end == end)
+                        {
                             found = c;
                             break;
                         }
@@ -965,23 +1012,28 @@ static int pciem_complete_init(struct pciem_host *v)
                 r = r->sibling;
             }
 
-            if (found && found->start == start && found->end == end) {
-                pr_info("init: BAR%d found existing iomem resource: %s [0x%llx-0x%llx]",
-                        i, found->name ? found->name : "<unnamed>", (u64)found->start, (u64)found->end);
+            if (found && found->start == start && found->end == end)
+            {
+                pr_info("init: BAR%d found existing iomem resource: %s [0x%llx-0x%llx]", i,
+                        found->name ? found->name : "<unnamed>", (u64)found->start, (u64)found->end);
                 bar->allocated_res = found;
                 bar->mem_owned_by_framework = false;
                 bar->phys_addr = start;
                 bar->virt_addr = NULL;
                 bar->pages = NULL;
-            } else {
+            }
+            else
+            {
                 mem_res = kzalloc(sizeof(*mem_res), GFP_KERNEL);
-                if (!mem_res) {
+                if (!mem_res)
+                {
                     rc = -ENOMEM;
                     goto fail_bars;
                 }
 
                 mem_res->name = kasprintf(GFP_KERNEL, "PCI BAR%d", i);
-                if (!mem_res->name) {
+                if (!mem_res->name)
+                {
                     kfree(mem_res);
                     rc = -ENOMEM;
                     goto fail_bars;
@@ -991,19 +1043,23 @@ static int pciem_complete_init(struct pciem_host *v)
                 mem_res->end = end;
                 mem_res->flags = IORESOURCE_MEM;
 
-                if (parent) {
-                    pr_info("init: BAR%d inserting into parent resource: %s [0x%llx-0x%llx]",
-                            i, parent->name ? parent->name : "<unnamed>",
-                            (u64)parent->start, (u64)parent->end);
-                    if (request_resource(parent, mem_res)) {
+                if (parent)
+                {
+                    pr_info("init: BAR%d inserting into parent resource: %s [0x%llx-0x%llx]", i,
+                            parent->name ? parent->name : "<unnamed>", (u64)parent->start, (u64)parent->end);
+                    if (request_resource(parent, mem_res))
+                    {
                         pr_err("init: BAR%d failed to insert into parent resource", i);
                         kfree(mem_res->name);
                         kfree(mem_res);
                         rc = -EBUSY;
                         goto fail_bars;
                     }
-                } else {
-                    if (request_resource(&iomem_resource, mem_res)) {
+                }
+                else
+                {
+                    if (request_resource(&iomem_resource, mem_res))
+                    {
                         pr_err("init: BAR%d phys region 0x%llx busy (request_resource failed).", i, (u64)start);
                         kfree(mem_res->name);
                         kfree(mem_res);
@@ -1190,6 +1246,18 @@ static int pciem_complete_init(struct pciem_host *v)
 
         pr_info("init: BAR%d mapped at %px for emulator (map_type=%d)", i, bar->virt_addr, bar->map_type);
     }
+
+    v->shared_buf_size = SHARED_BUF_SIZE;
+    v->shared_buf_vaddr =
+        dma_alloc_coherent(&v->protopciem_pdev->dev, v->shared_buf_size, &v->shared_buf_dma, GFP_KERNEL);
+    if (!v->shared_buf_vaddr)
+    {
+        pr_err("pciem: Failed to allocate shared bounce buffer\n");
+        rc = -ENOMEM;
+        goto fail_map;
+    }
+
+    memset(v->shared_buf_vaddr, 0, v->shared_buf_size);
 
     v->emul_thread = kthread_run(vph_emulator_thread, v, "vph_emulator");
     if (IS_ERR(v->emul_thread))

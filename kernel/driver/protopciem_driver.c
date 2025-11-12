@@ -458,7 +458,7 @@ static int pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
     INIT_WORK(&adev->work, pci_work_handler);
     pci_reset(adev);
 
-    adev->cmdbuf_size = 64 * 1024;
+    adev->cmdbuf_size = 4 * 1024 * 1024;
     adev->cmdbuf_virt = dma_alloc_coherent(&pdev->dev, adev->cmdbuf_size, &adev->cmdbuf_phys, GFP_KERNEL);
     if (!adev->cmdbuf_virt)
     {

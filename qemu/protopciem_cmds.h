@@ -11,7 +11,8 @@
 struct cmd_header
 {
     uint16_t opcode;
-    uint16_t length;
+    uint16_t reserved;
+    uint32_t length;
 } __attribute__((packed));
 
 struct cmd_clear

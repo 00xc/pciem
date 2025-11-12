@@ -117,7 +117,11 @@ struct pciem_host
     resource_size_t next_carve_offset;
 
     atomic_t guest_mmio_pending;
-    struct perf_event * __percpu *cmd_watchpoint;
+    struct perf_event * __percpu * cmd_watchpoint;
+
+    void *shared_buf_vaddr;
+    dma_addr_t shared_buf_dma;
+    size_t shared_buf_size;
 };
 
 struct pciem_device_ops;

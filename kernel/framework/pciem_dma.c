@@ -49,49 +49,65 @@ static int translate_iova(struct pciem_host *v, u64 guest_iova, size_t len, phys
 
 int pciem_dma_read_from_guest(struct pciem_host *v, u64 guest_iova, void *dst, size_t len, u32 pasid)
 {
-    phys_addr_t phys_pages[32];
-    int num_pages = 0;
-    size_t offset = 0;
-    int i;
+    struct iommu_domain *domain;
+    size_t remaining = len;
+    unsigned long iova = guest_iova;
+    u8 *dst_buf = (u8 *)dst;
 
     if (!v || !dst || len == 0)
     {
         return -EINVAL;
     }
 
-    if (len > sizeof(phys_pages) / sizeof(phys_pages[0]) * PAGE_SIZE)
+    domain = iommu_get_domain_for_dev(&v->protopciem_pdev->dev);
+
+    if (!domain)
     {
-        pr_err("DMA read too large: %zu bytes\n", len);
-        return -EINVAL;
+        phys_addr_t real_phys_addr = (phys_addr_t)guest_iova;
+
+        void *kernel_va = memremap(real_phys_addr, len, MEMREMAP_WB);
+        if (!kernel_va)
+        {
+            pr_err("pciem: memremap failed (no-iommu) for phys %pa len %zu\n", &real_phys_addr, len);
+            return -EFAULT;
+        }
+        clflush_cache_range(kernel_va, len);
+        memcpy(dst_buf, kernel_va, len);
+        memunmap(kernel_va);
+        return 0;
     }
 
-    if (translate_iova(v, guest_iova, len, phys_pages, &num_pages) < 0)
-    {
-        return -EFAULT;
-    }
+    pr_info("pciem: DMA read IOMMU: IOVA 0x%lx, len %zu, PASID %u\n", iova, len, pasid);
 
-    pr_info("DMA read: IOVA 0x%llx -> %d pages, len %zu, PASID %u\n", guest_iova, num_pages, len, pasid);
-
-    for (i = 0; i < num_pages && offset < len; i++)
+    while (remaining > 0)
     {
+        phys_addr_t hpa;
         void *kva;
         size_t chunk_len;
-        size_t page_offset = (i == 0) ? (guest_iova & ~PAGE_MASK) : 0;
 
-        chunk_len = min_t(size_t, len - offset, PAGE_SIZE - page_offset);
+        hpa = iommu_iova_to_phys(domain, iova);
+        if (!hpa)
+        {
+            pr_err("pciem: iommu_iova_to_phys failed for IOVA 0x%lx\n", iova);
+            return -EFAULT;
+        }
 
-        kva = memremap(phys_pages[i] + page_offset, chunk_len, MEMREMAP_WB);
+        chunk_len = min_t(size_t, remaining, PAGE_SIZE - (iova & ~PAGE_MASK));
+
+        kva = memremap(hpa, chunk_len, MEMREMAP_WB);
         if (!kva)
         {
-            pr_err("Failed to map physical page %pa\n", &phys_pages[i]);
+            pr_err("pciem: memremap failed for HPA %pa\n", &hpa);
             return -ENOMEM;
         }
 
         clflush_cache_range(kva, chunk_len);
-        memcpy((u8 *)dst + offset, kva, chunk_len);
+        memcpy(dst_buf, kva, chunk_len);
         memunmap(kva);
 
-        offset += chunk_len;
+        remaining -= chunk_len;
+        dst_buf += chunk_len;
+        iova += chunk_len;
     }
 
     return 0;
