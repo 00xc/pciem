@@ -146,12 +146,6 @@ int pciem_register_bar(struct pciem_host *v, int bar_num, resource_size_t size, 
     v->bars[bar_num].base_addr_val = 0;
     v->bars[bar_num].intercept_page_faults = intercept_faults;
 
-    if (intercept_faults)
-    {
-        INIT_LIST_HEAD(&v->bars[bar_num].vma_list);
-        spin_lock_init(&v->bars[bar_num].vma_lock);
-    }
-
     pr_info("pciem: Registered BAR %d: size 0x%llx, flags 0x%x, fault_intercept=%d\n", bar_num, (u64)size, flags,
             intercept_faults);
 
@@ -691,103 +685,6 @@ static void vph_fill_config(struct pciem_host *v)
     pciem_build_config_space(v);
 }
 
-static vm_fault_t pciem_bar_fault(struct vm_fault *vmf)
-{
-    struct vm_area_struct *vma = vmf->vma;
-    struct pciem_vma_tracking *tracking = vma->vm_private_data;
-    struct pciem_host *v;
-    struct pciem_bar_info *bar;
-    unsigned long offset = vmf->address - vma->vm_start;
-    pgoff_t pgoff = offset >> PAGE_SHIFT;
-    unsigned long flags;
-
-    if (!tracking)
-    {
-        return VM_FAULT_SIGBUS;
-    }
-
-    v = g_vph;
-    if (!v)
-    {
-        return VM_FAULT_SIGBUS;
-    }
-
-    bar = &v->bars[tracking->bar_index];
-
-    pr_info("BAR%d page fault at offset 0x%lx (page %lu)", tracking->bar_index, offset, pgoff);
-
-    spin_lock_irqsave(&bar->vma_lock, flags);
-
-    vma->vm_page_prot = vm_get_page_prot(vma->vm_flags);
-
-    if (remap_pfn_range(vma, vmf->address & PAGE_MASK, (bar->phys_addr + (pgoff << PAGE_SHIFT)) >> PAGE_SHIFT,
-                        PAGE_SIZE, vma->vm_page_prot))
-    {
-        spin_unlock_irqrestore(&bar->vma_lock, flags);
-        return VM_FAULT_SIGBUS;
-    }
-
-    atomic_set(&v->write_pending, 1);
-    wake_up_interruptible(&v->write_wait);
-
-    spin_unlock_irqrestore(&bar->vma_lock, flags);
-
-    return VM_FAULT_NOPAGE;
-}
-
-static void pciem_bar_vm_open(struct vm_area_struct *vma)
-{
-    struct pciem_vma_tracking *tracking = vma->vm_private_data;
-    struct pciem_host *v = g_vph;
-    struct pciem_bar_info *bar;
-    unsigned long flags;
-
-    if (!tracking || !v)
-    {
-        return;
-    }
-
-    bar = &v->bars[tracking->bar_index];
-
-    pr_info("pciem: BAR%d VMA opened: %p\n", tracking->bar_index, vma);
-
-    spin_lock_irqsave(&bar->vma_lock, flags);
-    tracking->vma = vma;
-    tracking->mm = vma->vm_mm;
-    spin_unlock_irqrestore(&bar->vma_lock, flags);
-}
-
-static void pciem_bar_vm_close(struct vm_area_struct *vma)
-{
-    struct pciem_vma_tracking *tracking = vma->vm_private_data;
-    struct pciem_host *v = g_vph;
-    struct pciem_bar_info *bar;
-    unsigned long flags;
-
-    if (!tracking || !v)
-    {
-        return;
-    }
-
-    bar = &v->bars[tracking->bar_index];
-
-    pr_info("pciem: BAR%d VMA closing: %p\n", tracking->bar_index, vma);
-
-    spin_lock_irqsave(&bar->vma_lock, flags);
-    tracking->vma = NULL;
-    tracking->mm = NULL;
-    list_del(&tracking->list);
-    spin_unlock_irqrestore(&bar->vma_lock, flags);
-
-    kfree(tracking);
-}
-
-static const struct vm_operations_struct pciem_bar_vm_ops = {
-    .fault = pciem_bar_fault,
-    .open = pciem_bar_vm_open,
-    .close = pciem_bar_vm_close,
-};
-
 static int vph_ctrl_mmap(struct file *file, struct vm_area_struct *vma)
 {
     struct pciem_host *v = g_vph;
@@ -795,8 +692,6 @@ static int vph_ctrl_mmap(struct file *file, struct vm_area_struct *vma)
     unsigned long offset = vma->vm_pgoff << PAGE_SHIFT;
     int bar_index = -1;
     struct pciem_bar_info *bar = NULL;
-    struct pciem_vma_tracking *tracking;
-    unsigned long flags;
     int i;
 
     if (!v)
@@ -835,33 +730,7 @@ static int vph_ctrl_mmap(struct file *file, struct vm_area_struct *vma)
 
     if (bar->intercept_page_faults)
     {
-        tracking = kzalloc(sizeof(*tracking), GFP_KERNEL);
-        if (!tracking)
-        {
-            return -ENOMEM;
-        }
-
-        tracking->vma = vma;
-        tracking->mm = vma->vm_mm;
-        tracking->bar_index = bar_index;
-        INIT_LIST_HEAD(&tracking->list);
-
-        vma->vm_page_prot = vm_get_page_prot(vma->vm_flags & ~VM_WRITE);
-        vma->vm_private_data = tracking;
-        vma->vm_ops = &pciem_bar_vm_ops;
-
-        spin_lock_irqsave(&bar->vma_lock, flags);
-        list_add(&tracking->list, &bar->vma_list);
-        spin_unlock_irqrestore(&bar->vma_lock, flags);
-
-        if (remap_pfn_range(vma, vma->vm_start, bar->phys_addr >> PAGE_SHIFT, size, vma->vm_page_prot))
-        {
-            spin_lock_irqsave(&bar->vma_lock, flags);
-            list_del(&tracking->list);
-            spin_unlock_irqrestore(&bar->vma_lock, flags);
-            kfree(tracking);
-            return -EAGAIN;
-        }
+        
     }
     else
     {
@@ -937,7 +806,6 @@ static const struct file_operations vph_ctrl_fops = {
 static int vph_emulator_thread(void *arg)
 {
     struct pciem_host *v = arg;
-    bool driver_wrote, proxy_irq;
     int i;
 
     if (!v)
@@ -974,60 +842,31 @@ static int vph_emulator_thread(void *arg)
 
     pr_info("Emulation thread started");
 
+    if (g_dev_ops->set_command_watchpoint)
+        g_dev_ops->set_command_watchpoint(v, true);
+
     while (!kthread_should_stop())
     {
-        wait_event_interruptible_timeout(v->write_wait,
-                                         ((driver_wrote = atomic_xchg(&v->write_pending, 0)) ||
-                                          (proxy_irq = atomic_xchg(&v->proxy_irq_pending, 0)) || kthread_should_stop()),
-                                         1);
+        bool proxy_irq, guest_mmio;
+
+        wait_event_interruptible(v->write_wait,
+                                 ((proxy_irq = atomic_xchg(&v->proxy_irq_pending, 0)) ||
+                                  (guest_mmio = atomic_xchg(&v->guest_mmio_pending, 0)) ||
+                                  kthread_should_stop()));
 
         if (kthread_should_stop())
         {
             break;
         }
 
-        if (driver_wrote)
+        if (guest_mmio || proxy_irq)
         {
-            for (i = 0; i < PCI_STD_NUM_BARS; i++)
-            {
-                struct pciem_bar_info *bar = &v->bars[i];
-                struct pciem_vma_tracking *tracking, *tmp;
-                unsigned long flags;
-
-                if (!bar->intercept_page_faults || bar->size == 0)
-                {
-                    continue;
-                }
-
-                spin_lock_irqsave(&bar->vma_lock, flags);
-                list_for_each_entry_safe(tracking, tmp, &bar->vma_list, list)
-                {
-                    struct mm_struct *mm = tracking->mm;
-                    struct vm_area_struct *vma = tracking->vma;
-
-                    if (mm && vma)
-                    {
-                        if (mmap_read_trylock(mm))
-                        {
-                            if (vma->vm_mm == mm)
-                            {
-                                vma->vm_page_prot = vm_get_page_prot(vma->vm_flags & ~VM_WRITE);
-                                zap_vma_ptes(vma, vma->vm_start, vma->vm_end - vma->vm_start);
-                            }
-                            mmap_read_unlock(mm);
-                        }
-                        else
-                        {
-                            atomic_set(&v->write_pending, 1);
-                        }
-                    }
-                }
-                spin_unlock_irqrestore(&bar->vma_lock, flags);
-            }
+            g_dev_ops->poll_device_state(v, proxy_irq);
         }
-
-        g_dev_ops->poll_device_state(v, proxy_irq);
     }
+
+    if (g_dev_ops->set_command_watchpoint)
+        g_dev_ops->set_command_watchpoint(v, false);
 
     g_dev_ops->cleanup_emulation_state(v);
     pr_info("Emulation thread stopped");
@@ -1513,8 +1352,6 @@ static int __init pciem_init(void)
     init_waitqueue_head(&g_vph->req_wait_full);
     g_vph->req_head = g_vph->req_tail = 0;
     atomic_set(&g_vph->proxy_count, 0);
-    spin_lock_init(&g_vph->fault_lock);
-    atomic_set(&g_vph->write_pending, 0);
     atomic_set(&g_vph->proxy_irq_pending, 0);
     init_waitqueue_head(&g_vph->write_wait);
     g_vph->device_private_data = NULL;

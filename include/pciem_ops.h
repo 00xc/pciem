@@ -55,6 +55,8 @@ struct pciem_device_ops
      * a proxy IRQ, false otherwise (timeout or page fault).
      */
     void (*poll_device_state)(struct pciem_host *v, bool proxy_irq_fired);
+
+    void (*set_command_watchpoint)(struct pciem_host *v, bool enable);
 };
 
 #endif /* PCIEM_OPS_H */

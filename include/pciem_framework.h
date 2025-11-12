@@ -105,11 +105,6 @@ struct pciem_host
     int req_head, req_tail;
     atomic_t proxy_count;
 
-    struct vm_area_struct *tracked_vma;
-    struct mm_struct *tracked_mm;
-    spinlock_t fault_lock;
-    atomic_t write_pending;
-
     atomic_t proxy_irq_pending;
     wait_queue_head_t write_wait;
 
@@ -120,6 +115,9 @@ struct pciem_host
     resource_size_t total_carved_start;
     resource_size_t total_carved_end;
     resource_size_t next_carve_offset;
+
+    atomic_t guest_mmio_pending;
+    struct perf_event * __percpu *cmd_watchpoint;
 };
 
 struct pciem_device_ops;

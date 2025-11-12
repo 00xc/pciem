@@ -4,12 +4,17 @@
 #include <linux/pci_regs.h>
 #include <linux/slab.h>
 #include <linux/module.h>
+#include <linux/perf_event.h>
+#include <linux/hw_breakpoint.h>
+#include <linux/percpu.h>
+#include <linux/cpumask.h>
+#include <linux/workqueue.h>
 
 #include "pciem_capabilities.h"
 #include "pciem_ops.h"
 #include "protopciem_device.h"
 
-MODULE_LICENSE("MIT");
+MODULE_LICENSE("GPL");
 MODULE_AUTHOR("cakehonolulu (cakehonolulu@protonmail.com)");
 MODULE_DESCRIPTION("ProtoPCIem Device Plugin for PCIem Framework");
 
@@ -26,7 +31,107 @@ struct proto_device_state
     u32 shadow_dma_dst_lo;
     u32 shadow_dst_hi;
     u32 shadow_dma_len;
+    struct pciem_host *host;
+    struct delayed_work watchpoint_work;
+    int retries;
 };
+
+static void proto_watchpoint_handler(struct perf_event *bp,
+                                     struct perf_sample_data *data,
+                                     struct pt_regs *regs)
+{
+    struct pciem_host *v = (struct pciem_host *)bp->overflow_handler_context;
+
+    if (!v) return;
+
+    pr_info("fwd: watchpoint hit on REG_CMD!\n");
+
+    perf_event_disable(bp);
+
+    atomic_set(&v->guest_mmio_pending, 1);
+
+    wake_up_interruptible(&v->write_wait);
+}
+
+static void proto_set_command_watchpoint(struct pciem_host *v, bool enable)
+{
+    struct proto_device_state *s = v->device_private_data;
+    if (!s) {
+        pr_err("fwd: No private data for watchpoint\n");
+        return;
+    }
+
+    if (enable) {
+        if (v->cmd_watchpoint) {
+            int cpu;
+            pr_info("fwd: watchpoint re-enabling\n");
+            for_each_online_cpu(cpu) {
+                struct perf_event *bp = *per_cpu_ptr(v->cmd_watchpoint, cpu);
+                if (bp)
+                    perf_event_enable(bp);
+            }
+            return;
+        }
+
+        struct pci_dev *pdev = v->protopciem_pdev;
+        if (!pdev) {
+            pr_err("fwd: No pdev available for watchpoint\n");
+            return;
+        }
+
+        void *drvdata = pci_get_drvdata(pdev);
+        if (!drvdata) {
+            if (s->retries == 0) s->retries = 20;
+            if (s->retries-- > 0) {
+                pr_info("fwd: Driver not probed yet, scheduling retry (%d left)\n", s->retries);
+                schedule_delayed_work(&s->watchpoint_work, msecs_to_jiffies(500));
+            } else {
+                pr_err("fwd: Timed out waiting for driver probe\n");
+            }
+            return;
+        }
+
+        // TODO: Something less hacky?
+        void __iomem **bar0_ptr = (void __iomem **)((char *)drvdata + sizeof(struct pci_dev *));
+        void __iomem *driver_bar0 = *bar0_ptr;
+        if (!driver_bar0) {
+            return;
+        }
+
+        unsigned long va_reg_cmd = (unsigned long)(driver_bar0 + REG_CMD);
+
+        struct perf_event_attr attr;
+        hw_breakpoint_init(&attr);
+        attr.bp_addr = va_reg_cmd;
+        attr.bp_len = HW_BREAKPOINT_LEN_4;
+        attr.bp_type = HW_BREAKPOINT_W;
+        attr.disabled = false;
+
+        v->cmd_watchpoint = register_wide_hw_breakpoint(&attr,
+                                                         proto_watchpoint_handler,
+                                                         v);
+
+        uintptr_t wp_val = (uintptr_t __force)v->cmd_watchpoint;
+
+        if (IS_ERR((void *)wp_val)) {
+            pr_err("... %ld\n", PTR_ERR((void *)wp_val));
+            v->cmd_watchpoint = NULL;
+        } else {
+            pr_info("fwd: watchpoint registered for driver's VA 0x%lx (BAR0+0x08)\n", va_reg_cmd);
+        }
+    } else if (v->cmd_watchpoint) {
+        unregister_wide_hw_breakpoint(v->cmd_watchpoint);
+        v->cmd_watchpoint = NULL;
+        pr_info("fwd: watchpoint unregistered\n");
+    }
+}
+
+static void proto_watchpoint_retry(struct work_struct *work)
+{
+    struct delayed_work *dwork = to_delayed_work(work);
+    struct proto_device_state *s = container_of(dwork, struct proto_device_state, watchpoint_work);
+    proto_set_command_watchpoint(s->host, true);
+}
 
 static int proto_init_state(struct pciem_host *v)
 {
@@ -38,6 +143,10 @@ static int proto_init_state(struct pciem_host *v)
     {
         return -ENOMEM;
     }
+
+    s->host = v;
+    s->retries = 0;
+    INIT_DELAYED_WORK(&s->watchpoint_work, proto_watchpoint_retry);
 
     v->device_private_data = s;
 
@@ -69,6 +178,8 @@ static int proto_init_state(struct pciem_host *v)
 
 static void proto_cleanup_state(struct pciem_host *v)
 {
+    struct proto_device_state *s = v->device_private_data;
+    cancel_delayed_work_sync(&s->watchpoint_work);
     pr_info("ProtoPCIem device state cleaning up\n");
     kfree(v->device_private_data);
     v->device_private_data = NULL;
@@ -77,46 +188,21 @@ static void proto_cleanup_state(struct pciem_host *v)
 static void proto_poll_state(struct pciem_host *v, bool proxy_irq_fired)
 {
     struct proto_device_state *s = v->device_private_data;
-    u32 mem_val;
-
     if (!s)
-    {
-        pr_err("proto_poll_state: no private state!\n");
         return;
+
+    u32 mem_val = ioread32(v->bars[0].virt_addr + REG_CMD);
+
+    if (atomic_read(&v->guest_mmio_pending)) {
+        atomic_set(&v->guest_mmio_pending, 0);
     }
 
-    if (atomic_read(&v->proxy_count) == 0)
-    {
-        return;
-    }
+    if (mem_val != 0 && s->shadow_cmd == 0) {
+        pr_info("fwd: New command issued: 0x%x\n", mem_val);
 
-    if (!v->bars[0].virt_addr)
-    {
-        pr_err_once("proto_poll_state: BAR0 not mapped!\n");
-        return;
-    }
-
-    mem_val = ioread32(v->bars[0].virt_addr + REG_CONTROL);
-    if (mem_val != s->shadow_control)
-    {
-        if (mem_val & CTRL_RESET)
-        {
-            pr_info("fwd: RESET detected");
-            memset_io(v->bars[0].virt_addr, 0, v->bars[0].size);
-            memset(s, 0, sizeof(*s));
-            return;
-        }
-
-        if (pci_shim_write(REG_CONTROL, mem_val, 4))
+        s->shadow_control = ioread32(v->bars[0].virt_addr + REG_CONTROL);
+        if (pci_shim_write(REG_CONTROL, s->shadow_control, 4))
             goto cmd_error;
-
-        s->shadow_control = mem_val;
-    }
-
-    mem_val = ioread32(v->bars[0].virt_addr + REG_CMD);
-    if (mem_val != s->shadow_cmd && mem_val != 0 && s->shadow_cmd == 0)
-    {
-        pr_info("fwd: NEW CMD detected: 0x%x", mem_val);
 
         s->shadow_data = ioread32(v->bars[0].virt_addr + REG_DATA);
         if (pci_shim_write(REG_DATA, s->shadow_data, 4))
@@ -149,10 +235,11 @@ static void proto_poll_state(struct pciem_host *v, bool proxy_irq_fired)
         s->shadow_status = STATUS_BUSY;
 
         iowrite32(STATUS_BUSY, v->bars[0].virt_addr + REG_STATUS);
+        return;
     }
     else if (proxy_irq_fired && s->shadow_cmd != 0)
     {
-        pr_info("fwd: Command completed via IRQ");
+        pr_info("fwd: Command completed via IRQ\n");
 
         s->shadow_status = (u32)pci_shim_read(REG_STATUS, 4);
         s->shadow_result_lo = (u32)pci_shim_read(REG_RESULT_LO, 4);
@@ -166,7 +253,15 @@ static void proto_poll_state(struct pciem_host *v, bool proxy_irq_fired)
         iowrite32(s->shadow_status, v->bars[0].virt_addr + REG_STATUS);
 
         pciem_trigger_msi(v);
+        proto_set_command_watchpoint(v, true);
+        return;
     }
+
+    // TODO: Just in case?
+    if (atomic_read(&v->guest_mmio_pending) || mem_val == 0) {
+        proto_set_command_watchpoint(v, true);
+    }
+
     return;
 
 cmd_error:
@@ -174,6 +269,7 @@ cmd_error:
     s->shadow_status = STATUS_ERROR | STATUS_DONE;
     iowrite32(s->shadow_status, v->bars[0].virt_addr + REG_STATUS);
     s->shadow_cmd = 0;
+    proto_set_command_watchpoint(v, true);
 }
 
 static int proto_register_capabilities(struct pciem_host *v)
@@ -248,6 +344,7 @@ static struct pciem_device_ops my_device_ops = {
     .init_emulation_state = proto_init_state,
     .cleanup_emulation_state = proto_cleanup_state,
     .poll_device_state = proto_poll_state,
+    .set_command_watchpoint = proto_set_command_watchpoint,
 };
 
 static int __init proto_plugin_init(void)
