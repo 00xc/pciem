@@ -194,19 +194,36 @@ static int proto_init_state(struct pciem_host *v)
 
     if (v->bars[2].virt_addr)
     {
-        u32 *ptr = (u32 *)v->bars[2].virt_addr;
+        void __iomem *bar2_base = v->bars[2].virt_addr;
+        resource_size_t bar2_size = v->bars[2].size;
         int i;
 
         pr_info("Initializing BAR2 data buffer with test pattern\n");
 
-        for (i = 0; i < v->bars[2].size / 4; i++)
+        if (!IS_ALIGNED((unsigned long)bar2_base, 4))
         {
-            iowrite32(i * 4, &ptr[i]);
+            pr_warn("BAR2 base not 4-byte aligned, skipping initialization\n");
         }
+        else
+        {
+            for (i = 0; i < bar2_size / 4; i++)
+            {
+                iowrite32(i * 4, bar2_base + (i * 4));
+            }
 
-        iowrite32(0xDEADBEEF, v->bars[2].virt_addr);
-        iowrite32(0xCAFEBABE, v->bars[2].virt_addr + 4);
-        iowrite32((u32)v->bars[2].size, v->bars[2].virt_addr + 8);
+            iowrite32(0xDEADBEEF, bar2_base);
+            iowrite32(0xCAFEBABE, bar2_base + 4);
+            if (v->bars[2].size <= 0xFFFFFFFFUL)
+            {
+                iowrite32((u32)v->bars[2].size, bar2_base + 8);
+            }
+            else
+            {
+                iowrite32((u32)(v->bars[2].size & 0xFFFFFFFF), bar2_base + 8);
+                iowrite32((u32)(v->bars[2].size >> 32), bar2_base + 12);
+                pr_info("BAR2 size is 64-bit: 0x%llx\n", (u64)v->bars[2].size);
+            }
+        }
     }
 
     pr_info("ProtoPCIem device state initialized\n");
