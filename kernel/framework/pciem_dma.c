@@ -8,19 +8,31 @@
 #include <linux/mm.h>
 #include <linux/slab.h>
 
-static int translate_iova(struct pciem_host *v, u64 guest_iova, size_t len, phys_addr_t *phys_pages, int *num_pages)
+static int translate_iova(struct pciem_host *v, u64 guest_iova, size_t len,
+                          phys_addr_t **phys_pages_out, int *num_pages)
 {
     struct iommu_domain *domain;
     size_t remaining = len;
     u64 iova = guest_iova;
     int page_count = 0;
+    int max_pages;
+    phys_addr_t *phys_pages;
 
     domain = iommu_get_domain_for_dev(&v->protopciem_pdev->dev);
+
+    max_pages = (PAGE_ALIGN(guest_iova + len) - (guest_iova & PAGE_MASK)) >> PAGE_SHIFT;
+
+    phys_pages = kmalloc_array(max_pages, sizeof(phys_addr_t), GFP_KERNEL);
+    if (!phys_pages) {
+        pr_err("translate_iova: failed to allocate page array for %d pages\n", max_pages);
+        return -ENOMEM;
+    }
 
     if (!domain)
     {
         phys_pages[0] = (phys_addr_t)guest_iova;
         *num_pages = 1;
+        *phys_pages_out = phys_pages;
         return 0;
     }
 
@@ -29,10 +41,18 @@ static int translate_iova(struct pciem_host *v, u64 guest_iova, size_t len, phys
         phys_addr_t hpa;
         size_t chunk_len;
 
+        if (page_count >= max_pages)
+        {
+            pr_err("translate_iova: page buffer overflow (calculated %d pages, but need more)\n", max_pages);
+            kfree(phys_pages);
+            return -EOVERFLOW;
+        }
+
         hpa = iommu_iova_to_phys(domain, iova);
         if (!hpa)
         {
             pr_err("Failed to translate IOVA 0x%llx\n", iova);
+            kfree(phys_pages);
             return -EFAULT;
         }
 
@@ -44,95 +64,77 @@ static int translate_iova(struct pciem_host *v, u64 guest_iova, size_t len, phys
     }
 
     *num_pages = page_count;
+    *phys_pages_out = phys_pages;
     return 0;
 }
 
 int pciem_dma_read_from_guest(struct pciem_host *v, u64 guest_iova, void *dst, size_t len, u32 pasid)
 {
-    struct iommu_domain *domain;
-    size_t remaining = len;
-    unsigned long iova = guest_iova;
+    phys_addr_t *phys_pages = NULL;
+    int num_pages = 0;
+    size_t offset = 0;
+    int i;
     u8 *dst_buf = (u8 *)dst;
+    int ret;
 
     if (!v || !dst || len == 0)
     {
         return -EINVAL;
     }
 
-    domain = iommu_get_domain_for_dev(&v->protopciem_pdev->dev);
-
-    if (!domain)
+    ret = translate_iova(v, guest_iova, len, &phys_pages, &num_pages);
+    if (ret < 0)
     {
-        phys_addr_t real_phys_addr = (phys_addr_t)guest_iova;
-
-        void *kernel_va = memremap(real_phys_addr, len, MEMREMAP_WB);
-        if (!kernel_va)
-        {
-            pr_err("pciem: memremap failed (no-iommu) for phys %pa len %zu\n", &real_phys_addr, len);
-            return -EFAULT;
-        }
-        memcpy(dst_buf, kernel_va, len);
-        memunmap(kernel_va);
-        return 0;
+        return ret;
     }
 
-    pr_info("pciem: DMA read IOMMU: IOVA 0x%lx, len %zu, PASID %u\n", iova, len, pasid);
+    pr_info("pciem: DMA read: IOVA 0x%llx -> %d pages, len %zu, PASID %u\n", 
+            guest_iova, num_pages, len, pasid);
 
-    while (remaining > 0)
+    for (i = 0; i < num_pages && offset < len; i++)
     {
-        phys_addr_t hpa;
         void *kva;
         size_t chunk_len;
+        size_t page_offset = (i == 0) ? (guest_iova & ~PAGE_MASK) : 0;
 
-        hpa = iommu_iova_to_phys(domain, iova);
-        if (!hpa)
-        {
-            pr_err("pciem: iommu_iova_to_phys failed for IOVA 0x%lx\n", iova);
-            return -EFAULT;
-        }
+        chunk_len = min_t(size_t, len - offset, PAGE_SIZE - page_offset);
 
-        chunk_len = min_t(size_t, remaining, PAGE_SIZE - (iova & ~PAGE_MASK));
-
-        kva = memremap(hpa, chunk_len, MEMREMAP_WB);
+        kva = memremap(phys_pages[i] + page_offset, chunk_len, MEMREMAP_WB);
         if (!kva)
         {
-            pr_err("pciem: memremap failed for HPA %pa\n", &hpa);
+            pr_err("pciem: memremap failed for physical page %pa\n", &phys_pages[i]);
+            kfree(phys_pages);
             return -ENOMEM;
         }
 
-        memcpy(dst_buf, kva, chunk_len);
+        memcpy(dst_buf + offset, kva, chunk_len);
         memunmap(kva);
 
-        remaining -= chunk_len;
-        dst_buf += chunk_len;
-        iova += chunk_len;
+        offset += chunk_len;
     }
 
+    kfree(phys_pages);
     return 0;
 }
 EXPORT_SYMBOL(pciem_dma_read_from_guest);
 
 int pciem_dma_write_to_guest(struct pciem_host *v, u64 guest_iova, const void *src, size_t len, u32 pasid)
 {
-    phys_addr_t phys_pages[32];
+    phys_addr_t *phys_pages = NULL;
     int num_pages = 0;
     size_t offset = 0;
     int i;
+    int ret;
 
     if (!v || !src || len == 0)
     {
         return -EINVAL;
     }
 
-    if (len > sizeof(phys_pages) / sizeof(phys_pages[0]) * PAGE_SIZE)
+    ret = translate_iova(v, guest_iova, len, &phys_pages, &num_pages);
+    if (ret < 0)
     {
-        pr_err("DMA write too large: %zu bytes\n", len);
-        return -EINVAL;
-    }
-
-    if (translate_iova(v, guest_iova, len, phys_pages, &num_pages) < 0)
-    {
-        return -EFAULT;
+        return ret;
     }
 
     pr_info("DMA write: IOVA 0x%llx -> %d pages, len %zu, PASID %u\n", guest_iova, num_pages, len, pasid);
@@ -149,6 +151,7 @@ int pciem_dma_write_to_guest(struct pciem_host *v, u64 guest_iova, const void *s
         if (!kva)
         {
             pr_err("Failed to map physical page %pa\n", &phys_pages[i]);
+            kfree(phys_pages);
             return -ENOMEM;
         }
 
@@ -158,6 +161,7 @@ int pciem_dma_write_to_guest(struct pciem_host *v, u64 guest_iova, const void *s
         offset += chunk_len;
     }
 
+    kfree(phys_pages);
     return 0;
 }
 EXPORT_SYMBOL(pciem_dma_write_to_guest);
@@ -167,8 +171,10 @@ static u64 do_atomic_op(struct pciem_host *v, u64 guest_iova, u8 op_type, u64 op
     phys_addr_t phys_addr;
     void *kva;
     u64 old_val = 0;
-    phys_addr_t phys_pages[1];
+    phys_addr_t *phys_pages = NULL;
     int num_pages;
+    atomic64_t *atomic_ptr;
+    int ret;
 
     if (guest_iova & 0x7)
     {
@@ -176,13 +182,15 @@ static u64 do_atomic_op(struct pciem_host *v, u64 guest_iova, u8 op_type, u64 op
         return 0;
     }
 
-    if (translate_iova(v, guest_iova, 8, phys_pages, &num_pages) < 0)
+    ret = translate_iova(v, guest_iova, 8, &phys_pages, &num_pages);
+    if (ret < 0)
     {
         pr_err("Failed to translate IOVA for atomic op\n");
         return 0;
     }
 
     phys_addr = phys_pages[0];
+    kfree(phys_pages);
 
     kva = memremap(phys_addr, 8, MEMREMAP_WB);
     if (!kva)
@@ -191,45 +199,54 @@ static u64 do_atomic_op(struct pciem_host *v, u64 guest_iova, u8 op_type, u64 op
         return 0;
     }
 
+    if (!IS_ALIGNED((unsigned long)kva, 8))
+    {
+        pr_err("Mapped address not 8-byte aligned: %px\n", kva);
+        memunmap(kva);
+        return 0;
+    }
+
+    atomic_ptr = (atomic64_t *)kva;
+
     switch (op_type)
     {
     case PCIEM_ATOMIC_FETCH_ADD:
-        old_val = atomic64_fetch_add(operand, (atomic64_t *)kva);
+        old_val = atomic64_fetch_add(operand, atomic_ptr);
         pr_info("Atomic FETCH_ADD: IOVA 0x%llx, old=0x%llx, add=0x%llx, PASID %u\n", guest_iova, old_val, operand,
                 pasid);
         break;
 
     case PCIEM_ATOMIC_FETCH_SUB:
-        old_val = atomic64_fetch_sub(operand, (atomic64_t *)kva);
+        old_val = atomic64_fetch_sub(operand, atomic_ptr);
         pr_info("Atomic FETCH_SUB: IOVA 0x%llx, old=0x%llx, sub=0x%llx, PASID %u\n", guest_iova, old_val, operand,
                 pasid);
         break;
 
     case PCIEM_ATOMIC_SWAP:
-        old_val = atomic64_xchg((atomic64_t *)kva, operand);
+        old_val = atomic64_xchg(atomic_ptr, operand);
         pr_info("Atomic SWAP: IOVA 0x%llx, old=0x%llx, new=0x%llx, PASID %u\n", guest_iova, old_val, operand, pasid);
         break;
 
     case PCIEM_ATOMIC_CAS:
-        old_val = atomic64_cmpxchg((atomic64_t *)kva, compare, operand);
+        old_val = atomic64_cmpxchg(atomic_ptr, compare, operand);
         pr_info("Atomic CAS: IOVA 0x%llx, old=0x%llx, expected=0x%llx, new=0x%llx, PASID %u\n", guest_iova, old_val,
                 compare, operand, pasid);
         break;
 
     case PCIEM_ATOMIC_FETCH_AND:
-        old_val = atomic64_fetch_and(operand, (atomic64_t *)kva);
+        old_val = atomic64_fetch_and(operand, atomic_ptr);
         pr_info("Atomic FETCH_AND: IOVA 0x%llx, old=0x%llx, mask=0x%llx, PASID %u\n", guest_iova, old_val, operand,
                 pasid);
         break;
 
     case PCIEM_ATOMIC_FETCH_OR:
-        old_val = atomic64_fetch_or(operand, (atomic64_t *)kva);
+        old_val = atomic64_fetch_or(operand, atomic_ptr);
         pr_info("Atomic FETCH_OR: IOVA 0x%llx, old=0x%llx, bits=0x%llx, PASID %u\n", guest_iova, old_val, operand,
                 pasid);
         break;
 
     case PCIEM_ATOMIC_FETCH_XOR:
-        old_val = atomic64_fetch_xor(operand, (atomic64_t *)kva);
+        old_val = atomic64_fetch_xor(operand, atomic_ptr);
         pr_info("Atomic FETCH_XOR: IOVA 0x%llx, old=0x%llx, bits=0x%llx, PASID %u\n", guest_iova, old_val, operand,
                 pasid);
         break;
