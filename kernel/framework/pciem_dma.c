@@ -28,14 +28,6 @@ static int translate_iova(struct pciem_host *v, u64 guest_iova, size_t len,
         return -ENOMEM;
     }
 
-    if (!domain)
-    {
-        phys_pages[0] = (phys_addr_t)guest_iova;
-        *num_pages = 1;
-        *phys_pages_out = phys_pages;
-        return 0;
-    }
-
     while (remaining > 0)
     {
         phys_addr_t hpa;
@@ -48,12 +40,16 @@ static int translate_iova(struct pciem_host *v, u64 guest_iova, size_t len,
             return -EOVERFLOW;
         }
 
-        hpa = iommu_iova_to_phys(domain, iova);
-        if (!hpa)
-        {
-            pr_err("Failed to translate IOVA 0x%llx\n", iova);
-            kfree(phys_pages);
-            return -EFAULT;
+        if (domain) {
+            hpa = iommu_iova_to_phys(domain, iova);
+            if (!hpa)
+            {
+                pr_err("Failed to translate IOVA 0x%llx\n", iova);
+                kfree(phys_pages);
+                return -EFAULT;
+            }
+        } else {
+            hpa = (phys_addr_t)iova;
         }
 
         phys_pages[page_count++] = hpa;
