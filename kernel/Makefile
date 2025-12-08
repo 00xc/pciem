@@ -4,6 +4,7 @@ ccflags-y := -I$(src)/../include -I$(src)/framework
 
 pciem-objs := framework/pciem_framework.o \
               framework/pciem_capabilities.o \
+              framework/pciem_p2p.o \
               framework/pciem_dma.o
 
 protopciem-device-objs := plugin/protopciem_device.c

@@ -216,6 +216,70 @@ static void backend_process_complete(void *opaque)
         backend_send_message(s, &dma_req);
         return;
     }
+    case CMD_DMA_P2P_READ: {
+        uint64_t host_phys = ((uint64_t)s->dma_src_hi << 32) | s->dma_src_lo;
+        uint32_t len = s->dma_len;
+
+        printf("[QEMU] P2P Read: 0x%lx (len %u)\n", host_phys, len);
+
+        if (s->shim_fd < 0) {
+            printf("[QEMU] ERROR: shim_fd not open for P2P\n");
+            s->status |= STATUS_ERROR;
+            break;
+        }
+
+        struct pciem_p2p_op op = {
+            .target_phys_addr = host_phys,
+            .len = len,
+            .flags = 0
+        };
+
+        if (ioctl(s->shim_fd, PCIEM_SHIM_IOCTL_P2P_READ, &op) < 0) {
+            perror("[QEMU] P2P Read Failed");
+            s->status |= STATUS_ERROR;
+        } else {
+            memcpy(s->framebuffer, s->shared_buf, len);
+            s->status |= STATUS_DONE;
+            s->status &= ~STATUS_BUSY;
+        }
+
+        ProtoPciemMessage done = {.type = MSG_CMD_DONE};
+        backend_send_message(s, &done);
+        return;
+    }
+
+    case CMD_DMA_P2P_WRITE: {
+        uint64_t host_phys = ((uint64_t)s->dma_dst_hi << 32) | s->dma_dst_lo;
+        uint32_t len = s->dma_len;
+
+        printf("[QEMU] P2P Write: 0x%lx (len %u)\n", host_phys, len);
+
+        if (s->shim_fd < 0) {
+            printf("[QEMU] ERROR: shim_fd not open for P2P\n");
+            s->status |= STATUS_ERROR;
+            break;
+        }
+
+        memcpy(s->shared_buf, s->framebuffer, len);
+
+        struct pciem_p2p_op op = {
+            .target_phys_addr = host_phys,
+            .len = len,
+            .flags = 0
+        };
+
+        if (ioctl(s->shim_fd, PCIEM_SHIM_IOCTL_P2P_WRITE, &op) < 0) {
+            perror("[QEMU] P2P Write Failed");
+            s->status |= STATUS_ERROR;
+        } else {
+            s->status |= STATUS_DONE;
+            s->status &= ~STATUS_BUSY;
+        }
+
+        ProtoPciemMessage done = {.type = MSG_CMD_DONE};
+        backend_send_message(s, &done);
+        return;
+    }
 
     default:
         printf("[QEMU ProtoPCIem] Unknown command 0x%x\n", s->cmd);
@@ -532,6 +596,22 @@ static void protopciem_backend_realize(DeviceState *dev, Error **errp)
 
     s->cmd_buffer_size = CMD_BUFFER_SIZE;
     s->cmd_buffer = g_malloc0(s->cmd_buffer_size);
+
+    s->shim_fd = open("/dev/pciem_shim", O_RDWR);
+    if (s->shim_fd < 0) {
+        perror("Failed to open /dev/pciem_shim");
+    }
+
+    if (s->shim_fd >= 0) {
+        s->shared_buf = mmap(NULL, 4 * 1024 * 1024,
+                            PROT_READ | PROT_WRITE,
+                            MAP_SHARED, s->shim_fd, 0);
+        if (s->shared_buf == MAP_FAILED) {
+            printf("Failed to mmap shared buffer\n");
+            close(s->shim_fd);
+            s->shim_fd = -1;
+        }
+    }
 
     s->con = graphic_console_init(dev, 0, &backend_gfx_ops, s);
     qemu_console_resize(s->con, FB_WIDTH, FB_HEIGHT);

@@ -18,6 +18,7 @@
 #define REG_DMA_DST_LO 0x28
 #define REG_DMA_DST_HI 0x2C
 #define REG_DMA_LEN 0x30
+#define REG_DMA_FLAGS 0x34
 
 #define CTRL_RESET BIT(1)
 #define STATUS_BUSY BIT(0)
@@ -30,5 +31,7 @@
 #define CMD_PROCESS_BUFFER 0x04
 #define CMD_EXECUTE_CMDBUF 0x05
 #define CMD_DMA_FRAME 0x06
+#define CMD_DMA_P2P_READ  0x07
+#define CMD_DMA_P2P_WRITE 0x08
 
 #endif /* PROTOPCIEM_DEVICE_H */

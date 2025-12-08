@@ -12,6 +12,8 @@
 #include <linux/platform_device.h>
 #include <linux/poll.h>
 #include <linux/wait.h>
+#include "pciem_p2p.h"
+#include "pciem_ioctl.h"
 
 struct pciem_tlp
 {
@@ -122,6 +124,8 @@ struct pciem_root_complex
     void *shared_buf_vaddr;
     dma_addr_t shared_buf_dma;
     size_t shared_buf_size;
+
+    struct pciem_p2p_manager *p2p_mgr;
 };
 
 struct pciem_epc_ops;

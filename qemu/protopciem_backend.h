@@ -7,8 +7,10 @@
 #include "qemu/bitops.h"
 #include "qom/object.h"
 #include "ui/console.h"
+#include <sys/ioctl.h>
 
 #include "protopciem_device.h"
+#include "pciem_ioctl.h"
 
 #define TYPE_PROTOPCIEM_BACKEND "protopciem-backend"
 OBJECT_DECLARE_SIMPLE_TYPE(ProtoPCIemState, PROTOPCIEM_BACKEND)
@@ -82,6 +84,9 @@ typedef struct ProtoPCIemState
     size_t cmd_buffer_size;
 
     qemu_irq irq;
+
+    int shim_fd;
+    void *shared_buf;
 
     QEMUTimer *process_timer;
 

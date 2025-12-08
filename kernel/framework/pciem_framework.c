@@ -30,31 +30,7 @@
 #include "pciem_dma.h"
 #include "pciem_framework.h"
 #include "pciem_ops.h"
-
-#define SHARED_BUF_SIZE (4 * 1024 * 1024)
-
-MODULE_LICENSE("Dual MIT/GPL");
-MODULE_AUTHOR("cakehonolulu (cakehonolulu@protonmail.com)");
-MODULE_DESCRIPTION("Synthetic PCIe device with QEMU forwarding");
-
-#define DRIVER_NAME "pciem"
-#define CTRL_DEVICE_NAME "pciem_ctrl"
-#define PCIEM_IOCTL_MAGIC 0xAF
-
-struct virt_bar_info
-{
-    u64 phys_start;
-    u64 size;
-};
-
-#define PCIEM_IOCTL_GET_BAR _IOWR(PCIEM_IOCTL_MAGIC, 1, struct pciem_get_bar_args)
-
-struct pciem_get_bar_args
-{
-    u32 bar_index;
-    u32 padding;
-    struct virt_bar_info info;
-};
+#include "pciem_p2p.h"
 
 static int use_qemu_forwarding = 0;
 module_param(use_qemu_forwarding, int, 0644);
@@ -65,27 +41,10 @@ module_param(pciem_phys_regions, charp, 0444);
 MODULE_PARM_DESC(pciem_phys_regions,
                  "Physical memory regions for BARs: bar0:0x1bf000000:0x10000,bar2:0x1bf010000:0x20000");
 
-#define SHIM_DEVICE_NAME "pciem_shim"
-
-struct shim_dma_shared_op
-{
-    __u64 host_phys_addr;
-    __u32 len;
-    __u32 padding;
-};
-#define PCIEM_SHIM_IOC_MAGIC 'R'
-#define PCIEM_SHIM_IOCTL_RAISE_IRQ _IOW(PCIEM_SHIM_IOC_MAGIC, 3, int)
-#define PCIEM_SHIM_IOCTL_LOWER_IRQ _IOW(PCIEM_SHIM_IOC_MAGIC, 4, int)
-#define PCIEM_SHIM_IOCTL_DMA_READ_SHARED _IOW(PCIEM_SHIM_IOC_MAGIC, 6, struct shim_dma_shared_op)
-
-struct shim_dma_read_op
-{
-    __u64 host_phys_addr;
-    __u64 user_buf_addr;
-    __u32 len;
-    __u32 padding;
-};
-#define PCIEM_SHIM_IOCTL_DMA_READ _IOWR(PCIEM_SHIM_IOC_MAGIC, 5, struct shim_dma_read_op)
+static char *p2p_regions = "";
+module_param(p2p_regions, charp, 0444);
+MODULE_PARM_DESC(p2p_regions,
+    "P2P whitelist: 0xADDR:0xSIZE,0xADDR:0xSIZE");
 
 static struct pciem_root_complex *g_vph;
 static struct pciem_epc_ops *g_dev_ops;
@@ -487,6 +446,23 @@ static long shim_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
             kfree(kbuf);
 
         break;
+    }
+    case PCIEM_SHIM_IOCTL_P2P_READ: {
+        struct pciem_p2p_op op;
+        if (copy_from_user(&op, (void __user *)arg, sizeof(op)))
+            return -EFAULT;
+
+        return pciem_p2p_read(v, op.target_phys_addr,
+                            v->shared_buf_vaddr, op.len);
+    }
+
+    case PCIEM_SHIM_IOCTL_P2P_WRITE: {
+        struct pciem_p2p_op op;
+        if (copy_from_user(&op, (void __user *)arg, sizeof(op)))
+            return -EFAULT;
+
+        return pciem_p2p_write(v, op.target_phys_addr,
+                            v->shared_buf_vaddr, op.len);
     }
     default:
         return -ENOTTY;
@@ -915,6 +891,11 @@ static int pciem_complete_init(struct pciem_root_complex *v)
     {
         pr_err("pciem: Failed to parse physical regions: %d\n", rc);
         goto fail_pdev;
+    }
+
+    rc = pciem_p2p_init(v, p2p_regions);
+    if (rc) {
+        pr_warn("pciem: P2P init failed: %d (non-fatal)\n", rc);
     }
 
     if (!g_dev_ops->register_bars)
@@ -1371,6 +1352,7 @@ static void pciem_teardown_device(struct pciem_root_complex *v)
     }
 
     pciem_cleanup_cap_manager(v);
+    pciem_p2p_cleanup(v);
 
     v->device_private_data = NULL;
 }
@@ -1513,3 +1495,7 @@ EXPORT_SYMBOL(pciem_unregister_ops);
 
 module_init(pciem_init);
 module_exit(pciem_exit);
+
+MODULE_LICENSE("Dual MIT/GPL");
+MODULE_AUTHOR("cakehonolulu (cakehonolulu@protonmail.com)");
+MODULE_DESCRIPTION("Synthetic PCIe device with QEMU forwarding");

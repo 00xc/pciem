@@ -32,6 +32,7 @@ MODULE_DESCRIPTION("ProtoPCIem Driver");
 #define REG_DMA_DST_LO 0x28
 #define REG_DMA_DST_HI 0x2C
 #define REG_DMA_LEN 0x30
+#define REG_DMA_FLAGS 0x34
 
 #define CTRL_ENABLE BIT(0)
 #define CTRL_RESET BIT(1)
@@ -46,6 +47,8 @@ MODULE_DESCRIPTION("ProtoPCIem Driver");
 #define CMD_PROCESS_BUFFER 0x04
 #define CMD_EXECUTE_CMDBUF 0x05
 #define CMD_DMA_FRAME 0x06
+#define CMD_DMA_P2P_READ  0x07
+#define CMD_DMA_P2P_WRITE 0x08
 
 #define FB_WIDTH 640
 #define FB_HEIGHT 480
