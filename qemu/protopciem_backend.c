@@ -5,10 +5,57 @@
 #include "hw/qdev-properties.h"
 #include "hw/sysbus.h"
 #include "qemu/log.h"
+#include "qemu/main-loop.h"
 #include "qemu/module.h"
 #include "qemu/timer.h"
 #include "ui/console.h"
 #include "ui/pixel_ops.h"
+#include <sys/ioctl.h>
+#include <sys/mman.h>
+
+#define FATAL_ERROR(...)                                                                                               \
+    do                                                                                                                 \
+    {                                                                                                                  \
+        printf("ProtoPCIem FATAL: " __VA_ARGS__);                                                                      \
+        printf("\n");                                                                                                  \
+        exit(1);                                                                                                       \
+    } while (0)
+
+static int readn(int fd, void *buf, size_t n)
+{
+    size_t r = 0;
+    while (r < n)
+    {
+        ssize_t m = read(fd, ((char *)buf) + r, n - r);
+        if (m == 0)
+            return 0;
+        if (m < 0)
+        {
+            if (errno == EINTR)
+                continue;
+            return -1;
+        }
+        r += m;
+    }
+    return (int)r;
+}
+
+static int writen(int fd, const void *buf, size_t n)
+{
+    size_t w = 0;
+    while (w < n)
+    {
+        ssize_t m = write(fd, ((const char *)buf) + w, n - w);
+        if (m <= 0)
+        {
+            if (errno == EINTR)
+                continue;
+            return -1;
+        }
+        w += m;
+    }
+    return (int)w;
+}
 
 static void gpu_draw_pixel(ProtoPCIemState *s, int x, int y, uint8_t r, uint8_t g, uint8_t b)
 {
@@ -104,20 +151,23 @@ static void backend_update_display(void *opaque)
 
 static void backend_execute_command_buffer(ProtoPCIemState *s)
 {
-    printf("[QEMU ProtoPCIem] Parsing command buffer (len=%u)\n", s->dma_len);
     uint8_t *p = s->cmd_buffer;
     uint8_t *end = p + s->dma_len;
-    int count = 0;
+
     while (p < end && (p + sizeof(struct cmd_header)) <= end)
     {
+        if ((uintptr_t)p % _Alignof(struct cmd_header) != 0)
+        {
+            FATAL_ERROR("Misaligned command");
+        }
+
         struct cmd_header *hdr = (struct cmd_header *)p;
+
         if (hdr->length == 0 || (p + hdr->length) > end)
         {
-            printf("[QEMU ProtoPCIem] Corrupt command buffer! opcode=0x%x len=%u p=%p end=%p\n", hdr->opcode,
-                   hdr->length, p, end);
-            s->status |= STATUS_ERROR;
-            break;
+            FATAL_ERROR("Corrupt command buffer");
         }
+
         switch (hdr->opcode)
         {
         case CMD_OP_NOP:
@@ -139,23 +189,12 @@ static void backend_execute_command_buffer(ProtoPCIemState *s)
             break;
         }
         default:
-            printf("[QEMU ProtoPCIem] Unknown opcode 0x%x\n", hdr->opcode);
-            s->status |= STATUS_ERROR;
+            printf("Unknown opcode 0x%x\n", hdr->opcode);
+            exit(1);
             break;
         }
-        p += hdr->length;
-        count++;
-    }
-    backend_update_display(s);
-    dpy_gfx_update_full(s->con);
-    printf("[QEMU ProtoPCIem] Processed %d commands\n", count);
-}
 
-static void backend_send_message(ProtoPCIemState *s, ProtoPciemMessage *msg)
-{
-    if (qemu_chr_fe_backend_connected(&s->chr))
-    {
-        qemu_chr_fe_write_all(&s->chr, (uint8_t *)msg, sizeof(*msg));
+        p += hdr->length;
     }
 }
 
@@ -166,146 +205,92 @@ static void backend_process_complete(void *opaque)
 
     switch (s->cmd)
     {
-    case CMD_ADD:
-        printf("[QEMU ProtoPCIem] CMD_ADD: %u + 42\n", s->data);
-        result = s->data + 42;
-        break;
-    case CMD_MULTIPLY:
-        printf("[QEMU ProtoPCIem] CMD_MULTIPLY: %u * 3\n", s->data);
-        result = s->data * 3;
-        break;
-    case CMD_XOR:
-        printf("[QEMU ProtoPCIem] CMD_XOR: %u ^ 0xABCD1234\n", s->data);
-        result = s->data ^ 0xABCD1234;
-        break;
-
     case CMD_DMA_FRAME:
     case CMD_EXECUTE_CMDBUF: {
         uint64_t src_addr = ((uint64_t)s->dma_src_hi << 32) | s->dma_src_lo;
-        uint64_t dst_addr = ((uint64_t)s->dma_dst_hi << 32) | s->dma_dst_lo;
         uint32_t len = s->dma_len;
 
-        printf("[QEMU ProtoPCIem] %s: src=0x%lx dst=0x%lx len=%u\n",
-               (s->cmd == CMD_DMA_FRAME) ? "CMD_DMA_FRAME" : "CMD_EXECUTE_CMDBUF", src_addr, dst_addr, len);
-
-        size_t target_size;
         if (s->cmd == CMD_EXECUTE_CMDBUF)
         {
-            target_size = s->cmd_buffer_size;
+            if (len > s->cmd_buffer_size)
+                len = s->cmd_buffer_size;
+            struct shim_dma_shared_op op;
+            op.host_phys_addr = src_addr;
+            op.len = len;
+            if (ioctl(s->shim_fd, PCIEM_SHIM_IOCTL_DMA_READ_SHARED, &op) < 0)
+            {
+                perror("[QEMU] DMA_READ_SHARED failed");
+            }
+            else
+            {
+                backend_execute_command_buffer(s);
+            }
         }
-        else
+        else if (s->cmd == CMD_DMA_FRAME)
         {
-            target_size = FB_SIZE;
+            if (len != FB_SIZE)
+            {
+                FATAL_ERROR("DMA Frame size mismatch");
+            }
+            else
+            {
+                struct shim_dma_read_op op;
+                op.host_phys_addr = src_addr;
+                op.user_buf_addr = (uint64_t)(uintptr_t)s->framebuffer;
+                op.len = len;
+                if (ioctl(s->shim_fd, PCIEM_SHIM_IOCTL_DMA_READ, &op) < 0)
+                {
+                    perror("[QEMU] DMA_READ failed");
+                }
+                else
+                {
+                    backend_update_display(s);
+                }
+            }
         }
 
-        if (len == 0 || (dst_addr + len) > target_size)
-        {
-            printf("[QEMU ProtoPCIem] Invalid DMA: dst=0x%lx len=%u (target_size=%zu)\n", dst_addr, len, target_size);
-            s->status |= STATUS_ERROR | STATUS_DONE;
-            s->status &= ~STATUS_BUSY;
-            ProtoPciemMessage done = {.type = MSG_CMD_DONE};
-            backend_send_message(s, &done);
-            return;
-        }
+        s->status |= STATUS_DONE;
+        s->status &= ~STATUS_BUSY;
 
-        ProtoPciemMessage dma_req = {.type = MSG_DMA_READ,
-                                     .addr = src_addr,
-                                     .data = dst_addr,
-                                     .size = (uint8_t)(len & 0xFF),
-                                     .reserved = (uint16_t)((len >> 8) & 0xFFFF)};
-        backend_send_message(s, &dma_req);
+        int zero = 0;
+        ioctl(s->shim_fd, PCIEM_SHIM_IOCTL_RAISE_IRQ, &zero);
         return;
     }
-    case CMD_DMA_P2P_READ: {
-        uint64_t host_phys = ((uint64_t)s->dma_src_hi << 32) | s->dma_src_lo;
-        uint32_t len = s->dma_len;
-
-        printf("[QEMU] P2P Read: 0x%lx (len %u)\n", host_phys, len);
-
-        if (s->shim_fd < 0) {
-            printf("[QEMU] ERROR: shim_fd not open for P2P\n");
-            s->status |= STATUS_ERROR;
-            break;
-        }
-
-        struct pciem_p2p_op op = {
-            .target_phys_addr = host_phys,
-            .len = len,
-            .flags = 0
-        };
-
-        if (ioctl(s->shim_fd, PCIEM_SHIM_IOCTL_P2P_READ, &op) < 0) {
-            perror("[QEMU] P2P Read Failed");
-            s->status |= STATUS_ERROR;
-        } else {
-            memcpy(s->framebuffer, s->shared_buf, len);
-            s->status |= STATUS_DONE;
-            s->status &= ~STATUS_BUSY;
-        }
-
-        ProtoPciemMessage done = {.type = MSG_CMD_DONE};
-        backend_send_message(s, &done);
-        return;
-    }
-
-    case CMD_DMA_P2P_WRITE: {
-        uint64_t host_phys = ((uint64_t)s->dma_dst_hi << 32) | s->dma_dst_lo;
-        uint32_t len = s->dma_len;
-
-        printf("[QEMU] P2P Write: 0x%lx (len %u)\n", host_phys, len);
-
-        if (s->shim_fd < 0) {
-            printf("[QEMU] ERROR: shim_fd not open for P2P\n");
-            s->status |= STATUS_ERROR;
-            break;
-        }
-
-        memcpy(s->shared_buf, s->framebuffer, len);
-
-        struct pciem_p2p_op op = {
-            .target_phys_addr = host_phys,
-            .len = len,
-            .flags = 0
-        };
-
-        if (ioctl(s->shim_fd, PCIEM_SHIM_IOCTL_P2P_WRITE, &op) < 0) {
-            perror("[QEMU] P2P Write Failed");
-            s->status |= STATUS_ERROR;
-        } else {
-            s->status |= STATUS_DONE;
-            s->status &= ~STATUS_BUSY;
-        }
-
-        ProtoPciemMessage done = {.type = MSG_CMD_DONE};
-        backend_send_message(s, &done);
-        return;
-    }
-
     default:
-        printf("[QEMU ProtoPCIem] Unknown command 0x%x\n", s->cmd);
-        s->status |= STATUS_ERROR;
+        FATAL_ERROR("Unknown command");
         break;
     }
 
-    if (s->cmd != CMD_EXECUTE_CMDBUF && s->cmd != CMD_DMA_FRAME)
-    {
-        s->result_lo = result & 0xFFFFFFFF;
-        s->result_hi = result >> 32;
-        s->status |= STATUS_DONE;
-        s->status &= ~STATUS_BUSY;
-        ProtoPciemMessage done_msg = {.type = MSG_CMD_DONE};
-        backend_send_message(s, &done_msg);
-        printf("[QEMU ProtoPCIem] Command complete, sent MSG_CMD_DONE\n");
-    }
+    s->result_lo = result & 0xFFFFFFFF;
+    s->result_hi = result >> 32;
+    s->status |= STATUS_DONE;
+    s->status &= ~STATUS_BUSY;
+
+    int zero = 0;
+    ioctl(s->shim_fd, PCIEM_SHIM_IOCTL_RAISE_IRQ, &zero);
 }
 
-static void backend_handle_message(ProtoPCIemState *s, ProtoPciemMessage *msg)
+static void backend_handle_shim_event(void *opaque)
 {
-    switch (msg->type)
+    ProtoPCIemState *s = PROTOPCIEM_BACKEND(opaque);
+    struct shim_req req;
+    struct shim_resp resp;
+
+    int len = readn(s->shim_fd, &req, sizeof(req));
+    if (len != sizeof(req))
     {
-    case MSG_MMIO_READ: {
+        if (len <= 0)
+        {
+            qemu_set_fd_handler(s->shim_fd, NULL, NULL, s);
+            close(s->shim_fd);
+            s->shim_fd = -1;
+        }
+        return;
+    }
+    if (req.type == 1)
+    {
         uint64_t val = 0;
-        switch (msg->addr)
+        switch (req.addr)
         {
         case REG_CONTROL:
             val = s->control;
@@ -340,21 +325,18 @@ static void backend_handle_message(ProtoPCIemState *s, ProtoPciemMessage *msg)
         case REG_DMA_LEN:
             val = s->dma_len;
             break;
-        default:
-            val = 0;
-            break;
         }
-        ProtoPciemMessage reply = {.type = MSG_MMIO_READ_REPLY, .size = msg->size, .addr = msg->addr, .data = val};
-        backend_send_message(s, &reply);
-        break;
+        resp.id = req.id;
+        resp.data = val;
+        writen(s->shim_fd, &resp, sizeof(resp));
     }
-
-    case MSG_MMIO_WRITE:
-        switch (msg->addr)
+    else if (req.type == 2)
+    {
+        switch (req.addr)
         {
         case REG_CONTROL:
-            s->control = msg->data;
-            if (msg->data & CTRL_RESET)
+            s->control = req.data;
+            if (req.data & 2)
             {
                 s->status = 0;
                 s->cmd = 0;
@@ -364,181 +346,51 @@ static void backend_handle_message(ProtoPCIemState *s, ProtoPciemMessage *msg)
             }
             break;
         case REG_STATUS:
-            s->status = msg->data;
+            s->status = req.data;
             break;
         case REG_CMD:
-            s->cmd = msg->data;
-            if (s->cmd == CMD_DMA_FRAME || s->cmd == CMD_EXECUTE_CMDBUF)
-            {
-                backend_process_complete(s);
-            }
-            else
-            {
-                timer_mod(s->process_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 5000000);
-            }
+            s->cmd = req.data;
+            s->status &= ~2;
+            s->status |= 1;
+            backend_process_complete(s);
             break;
         case REG_DATA:
-            s->data = msg->data;
+            s->data = req.data;
             break;
         case REG_RESULT_LO:
-            s->result_lo = msg->data;
+            s->result_lo = req.data;
             break;
         case REG_RESULT_HI:
-            s->result_hi = msg->data;
+            s->result_hi = req.data;
             break;
         case REG_DMA_SRC_LO:
-            s->dma_src_lo = msg->data;
+            s->dma_src_lo = req.data;
             break;
         case REG_DMA_SRC_HI:
-            s->dma_src_hi = msg->data;
+            s->dma_src_hi = req.data;
             break;
         case REG_DMA_DST_LO:
-            s->dma_dst_lo = msg->data;
+            s->dma_dst_lo = req.data;
             break;
         case REG_DMA_DST_HI:
-            s->dma_dst_hi = msg->data;
+            s->dma_dst_hi = req.data;
             break;
         case REG_DMA_LEN:
-            s->dma_len = msg->data;
-            break;
-        default:
+            s->dma_len = req.data;
             break;
         }
-        break;
-
-    case MSG_DMA_WRITE: {
-        if (msg->size == 0)
-        {
-            printf("[QEMU ProtoPCIem] DMA transfer complete\n");
-
-            if (s->cmd == CMD_EXECUTE_CMDBUF)
-            {
-                backend_execute_command_buffer(s);
-            }
-            else if (s->cmd == CMD_DMA_FRAME)
-            {
-                backend_update_display(s);
-                dpy_gfx_update_full(s->con);
-            }
-
-            s->status |= STATUS_DONE;
-            s->status &= ~STATUS_BUSY;
-            ProtoPciemMessage done_msg = {.type = MSG_CMD_DONE};
-            backend_send_message(s, &done_msg);
-        }
-        break;
-    }
-
-    case MSG_RESET:
-        s->control = 0;
-        s->status = 0;
-        s->cmd = 0;
-        s->data = 0;
-        gpu_clear(s, 0, 0, 0);
-        backend_update_display(s);
-        break;
-
-    default:
-        break;
-    }
-}
-
-static int backend_chr_can_receive(void *opaque)
-{
-    ProtoPCIemState *s = opaque;
-    if (s->recv_state == RECV_STATE_PAYLOAD)
-    {
-        return s->expected_payload_len - s->recv_pos;
-    }
-    return sizeof(ProtoPciemMessage) * 16;
-}
-
-static void backend_chr_receive(void *opaque, const uint8_t *buf, int size)
-{
-    ProtoPCIemState *s = opaque;
-    int consumed = 0;
-
-    while (consumed < size)
-    {
-        if (s->recv_state == RECV_STATE_HEADER)
-        {
-            int remaining = sizeof(ProtoPciemMessage) - s->recv_pos;
-            int to_copy = (size - consumed < remaining) ? (size - consumed) : remaining;
-            memcpy(s->recv_buf + s->recv_pos, buf + consumed, to_copy);
-            s->recv_pos += to_copy;
-            consumed += to_copy;
-
-            if (s->recv_pos == sizeof(ProtoPciemMessage))
-            {
-                ProtoPciemMessage *msg = (ProtoPciemMessage *)s->recv_buf;
-                s->recv_pos = 0;
-                if (msg->type == MSG_DMA_WRITE_CHUNK)
-                {
-                    s->expected_payload_len = ((uint32_t)msg->reserved << 8) | msg->size;
-                    s->payload_dst_addr = msg->addr;
-
-                    size_t target_size;
-                    if (s->cmd == CMD_EXECUTE_CMDBUF)
-                    {
-                        target_size = s->cmd_buffer_size;
-                    }
-                    else
-                    {
-                        target_size = FB_SIZE;
-                    }
-
-                    if (s->expected_payload_len == 0 || s->payload_dst_addr + s->expected_payload_len > target_size)
-                    {
-                        printf("[QEMU ProtoPCIem] Invalid chunk: dst=0x%lx len=%zu (target_size=%zu)\n",
-                               s->payload_dst_addr, s->expected_payload_len, target_size);
-                        s->recv_state = RECV_STATE_HEADER;
-                        s->status |= STATUS_ERROR;
-                    }
-                    else
-                    {
-                        s->recv_state = RECV_STATE_PAYLOAD;
-                    }
-                }
-                else
-                {
-                    backend_handle_message(s, msg);
-                    s->recv_state = RECV_STATE_HEADER;
-                }
-            }
-        }
-        else
-        {
-            int remaining = s->expected_payload_len - s->recv_pos;
-            int to_copy = (size - consumed < remaining) ? (size - consumed) : remaining;
-
-            if (s->cmd == CMD_EXECUTE_CMDBUF)
-            {
-                memcpy(s->cmd_buffer + s->payload_dst_addr + s->recv_pos, buf + consumed, to_copy);
-            }
-            else
-            {
-                memcpy(s->framebuffer + s->payload_dst_addr + s->recv_pos, buf + consumed, to_copy);
-            }
-            s->recv_pos += to_copy;
-            consumed += to_copy;
-
-            if (s->recv_pos == s->expected_payload_len)
-            {
-                s->recv_state = RECV_STATE_HEADER;
-                s->recv_pos = 0;
-            }
-        }
+        resp.id = req.id;
+        resp.data = 0;
+        writen(s->shim_fd, &resp, sizeof(resp));
     }
 }
 
 static uint64_t backend_read(void *opaque, hwaddr offset, unsigned size)
 {
-    qemu_log("[QEMU ProtoPCIem]: sysbus_read offset 0x%lx, size %u\n", offset, size);
     return 0;
 }
 static void backend_write(void *opaque, hwaddr offset, uint64_t value, unsigned size)
 {
-    qemu_log("[QEMU ProtoPCIem]: sysbus_write offset 0x%lx, size %u, value 0x%lx\n", offset, size, value);
 }
 static const MemoryRegionOps backend_ops = {
     .read = backend_read,
@@ -551,21 +403,10 @@ static const MemoryRegionOps backend_ops = {
         },
 };
 
-static void backend_poll_timer(void *opaque)
-{
-    ProtoPCIemState *s = opaque;
-    if (qemu_chr_fe_backend_connected(&s->chr))
-    {
-        qemu_chr_fe_accept_input(&s->chr);
-    }
-    timer_mod(s->poll_timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 1);
-}
-
 static void backend_invalidate_display(void *opaque)
 {
     backend_update_display(opaque);
 }
-
 static const GraphicHwOps backend_gfx_ops = {
     .invalidate = backend_invalidate_display,
     .gfx_update = backend_update_display,
@@ -580,53 +421,34 @@ static void protopciem_backend_realize(DeviceState *dev, Error **errp)
     sysbus_init_mmio(sbd, &s->iomem);
     sysbus_init_irq(sbd, &s->irq);
 
-    s->process_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, backend_process_complete, s);
-
-    qemu_chr_fe_set_handlers(&s->chr, backend_chr_can_receive, backend_chr_receive, NULL, NULL, s, NULL, true);
-
-    s->poll_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL, backend_poll_timer, s);
-    timer_mod(s->poll_timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 1);
-
-    s->recv_state = RECV_STATE_HEADER;
-    s->recv_pos = 0;
-    s->expected_payload_len = 0;
-    s->payload_dst_addr = 0;
-
-    s->framebuffer = g_malloc0(FB_SIZE);
+    s->shim_fd = open("/dev/pciem_shim", O_RDWR);
+    if (s->shim_fd < 0)
+    {
+        perror("Failed to open /dev/pciem_shim");
+        return;
+    }
 
     s->cmd_buffer_size = CMD_BUFFER_SIZE;
-    s->cmd_buffer = g_malloc0(s->cmd_buffer_size);
-
-    s->shim_fd = open("/dev/pciem_shim", O_RDWR);
-    if (s->shim_fd < 0) {
-        perror("Failed to open /dev/pciem_shim");
+    s->cmd_buffer = mmap(NULL, s->cmd_buffer_size, PROT_READ | PROT_WRITE, MAP_SHARED, s->shim_fd, 0);
+    if (s->cmd_buffer == MAP_FAILED)
+    {
+        perror("Failed to mmap shared command buffer");
+        close(s->shim_fd);
+        return;
     }
 
-    if (s->shim_fd >= 0) {
-        s->shared_buf = mmap(NULL, 4 * 1024 * 1024,
-                            PROT_READ | PROT_WRITE,
-                            MAP_SHARED, s->shim_fd, 0);
-        if (s->shared_buf == MAP_FAILED) {
-            printf("Failed to mmap shared buffer\n");
-            close(s->shim_fd);
-            s->shim_fd = -1;
-        }
-    }
+    qemu_set_fd_handler(s->shim_fd, backend_handle_shim_event, NULL, s);
 
+    s->framebuffer = g_malloc0(FB_SIZE);
     s->con = graphic_console_init(dev, 0, &backend_gfx_ops, s);
     qemu_console_resize(s->con, FB_WIDTH, FB_HEIGHT);
 }
-
-static const Property protopciem_backend_properties[] = {
-    DEFINE_PROP_CHR("chardev", ProtoPCIemState, chr),
-};
 
 static void protopciem_backend_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     dc->realize = protopciem_backend_realize;
     dc->desc = "ProtoPCIem Accelerator Backend";
-    device_class_set_props(dc, protopciem_backend_properties);
 }
 
 static const TypeInfo protopciem_backend_info = {

@@ -24,12 +24,6 @@ struct pciem_tlp
     uint64_t data;
 } __attribute__((packed));
 
-struct shim_resp
-{
-    uint32_t id;
-    uint64_t data;
-} __attribute__((packed));
-
 #define MAX_PENDING_REQS 256
 struct pending_req
 {

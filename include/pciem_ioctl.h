@@ -13,6 +13,19 @@
 
 #define SHIM_DEVICE_NAME "pciem_shim"
 
+struct shim_req {
+    uint32_t id;
+    uint32_t type;
+    uint32_t size;
+    uint64_t addr;
+    uint64_t data;
+} __attribute__((packed));
+
+struct shim_resp {
+    uint32_t id;
+    uint64_t data;
+} __attribute__((packed));
+
 struct virt_bar_info
 {
     uint64_t phys_start;
