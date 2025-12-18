@@ -253,10 +253,8 @@ static void proto_poll_state(struct pciem_root_complex *v, bool proxy_irq_fired)
 
     u32 mem_val = ioread32(v->bars[0].virt_addr + REG_CMD);
 
-    if (atomic_read(&v->guest_mmio_pending))
+    if (atomic_xchg(&v->guest_mmio_pending, 0))
     {
-        atomic_set(&v->guest_mmio_pending, 0);
-
         if (my_device_ops.set_command_watchpoint)
             my_device_ops.set_command_watchpoint(v, false);
     }
