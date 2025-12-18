@@ -251,7 +251,8 @@ static void proto_poll_state(struct pciem_root_complex *v, bool proxy_irq_fired)
     if (!s)
         return;
 
-    u32 mem_val = ioread32(v->bars[0].virt_addr + REG_CMD);
+    void __iomem *bar0 = v->bars[0].virt_addr;
+    u32 mem_val = ioread32(bar0 + REG_CMD);
 
     if (atomic_xchg(&v->guest_mmio_pending, 0))
     {
@@ -263,31 +264,31 @@ static void proto_poll_state(struct pciem_root_complex *v, bool proxy_irq_fired)
     {
         pr_info("fwd: New command issued: 0x%x\n", mem_val);
 
-        s->shadow_control = ioread32(v->bars[0].virt_addr + REG_CONTROL);
+        s->shadow_control = ioread32(bar0 + REG_CONTROL);
         if (pci_shim_write(REG_CONTROL, s->shadow_control, 4))
             goto cmd_error;
 
-        s->shadow_data = ioread32(v->bars[0].virt_addr + REG_DATA);
+        s->shadow_data = ioread32(bar0 + REG_DATA);
         if (pci_shim_write(REG_DATA, s->shadow_data, 4))
             goto cmd_error;
 
-        s->shadow_dma_src_lo = ioread32(v->bars[0].virt_addr + REG_DMA_SRC_LO);
+        s->shadow_dma_src_lo = ioread32(bar0 + REG_DMA_SRC_LO);
         if (pci_shim_write(REG_DMA_SRC_LO, s->shadow_dma_src_lo, 4))
             goto cmd_error;
 
-        s->shadow_dma_src_hi = ioread32(v->bars[0].virt_addr + REG_DMA_SRC_HI);
+        s->shadow_dma_src_hi = ioread32(bar0 + REG_DMA_SRC_HI);
         if (pci_shim_write(REG_DMA_SRC_HI, s->shadow_dma_src_hi, 4))
             goto cmd_error;
 
-        s->shadow_dma_dst_lo = ioread32(v->bars[0].virt_addr + REG_DMA_DST_LO);
+        s->shadow_dma_dst_lo = ioread32(bar0 + REG_DMA_DST_LO);
         if (pci_shim_write(REG_DMA_DST_LO, s->shadow_dma_dst_lo, 4))
             goto cmd_error;
 
-        s->shadow_dst_hi = ioread32(v->bars[0].virt_addr + REG_DMA_DST_HI);
+        s->shadow_dst_hi = ioread32(bar0 + REG_DMA_DST_HI);
         if (pci_shim_write(REG_DMA_DST_HI, s->shadow_dst_hi, 4))
             goto cmd_error;
 
-        s->shadow_dma_len = ioread32(v->bars[0].virt_addr + REG_DMA_LEN);
+        s->shadow_dma_len = ioread32(bar0 + REG_DMA_LEN);
         if (pci_shim_write(REG_DMA_LEN, s->shadow_dma_len, 4))
             goto cmd_error;
 
@@ -297,7 +298,7 @@ static void proto_poll_state(struct pciem_root_complex *v, bool proxy_irq_fired)
         s->shadow_cmd = mem_val;
         s->shadow_status = STATUS_BUSY;
 
-        iowrite32(STATUS_BUSY, v->bars[0].virt_addr + REG_STATUS);
+        iowrite32(STATUS_BUSY, bar0 + REG_STATUS);
         return;
     }
     else if (proxy_irq_fired && s->shadow_cmd != 0)
@@ -310,9 +311,9 @@ static void proto_poll_state(struct pciem_root_complex *v, bool proxy_irq_fired)
 
         s->shadow_cmd = 0;
 
-        iowrite32(s->shadow_result_lo, v->bars[0].virt_addr + REG_RESULT_LO);
-        iowrite32(s->shadow_result_hi, v->bars[0].virt_addr + REG_RESULT_HI);
-        iowrite32(s->shadow_status, v->bars[0].virt_addr + REG_STATUS);
+        iowrite32(s->shadow_result_lo, bar0 + REG_RESULT_LO);
+        iowrite32(s->shadow_result_hi, bar0 + REG_RESULT_HI);
+        iowrite32(s->shadow_status, bar0 + REG_STATUS);
 
         pciem_trigger_msi(v);
         if (my_device_ops.set_command_watchpoint)
@@ -332,7 +333,7 @@ static void proto_poll_state(struct pciem_root_complex *v, bool proxy_irq_fired)
 cmd_error:
     pr_err("fwd: shim write failed, aborting command\n");
     s->shadow_status = STATUS_ERROR | STATUS_DONE;
-    iowrite32(s->shadow_status, v->bars[0].virt_addr + REG_STATUS);
+    iowrite32(s->shadow_status, bar0 + REG_STATUS);
     s->shadow_cmd = 0;
     if (my_device_ops.set_command_watchpoint)
         my_device_ops.set_command_watchpoint(v, true);
