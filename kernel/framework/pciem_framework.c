@@ -278,6 +278,31 @@ static int pciem_reserve_bar_res(struct pciem_bar_info *bar, int i, struct list_
     return 0;
 }
 
+static int pciem_reserve_bars_res(struct pciem_root_complex *v, struct list_head *resources)
+{
+    int i, rc;
+    struct pciem_bar_info *bar, *prev = NULL;
+
+    for (i = 0; i < PCI_STD_NUM_BARS; i++)
+    {
+        bar = &v->bars[i];
+        if (i > 0)
+            prev = &v->bars[i - 1];
+
+        if (!bar->size)
+            continue;
+
+        if (i & 1 && prev && prev->flags & PCI_BASE_ADDRESS_MEM_TYPE_64)
+            continue;
+
+        rc = pciem_reserve_bar_res(bar, i, resources);
+        if (rc)
+            return rc;
+    }
+
+    return 0;
+}
+
 static int pciem_map_bar_qemu(struct pciem_bar_info *bar, int i)
 {
     pr_info("init: BAR%d QEMU poller mapping as WC (ioremap_wc)", i);
@@ -1132,24 +1157,9 @@ static int pciem_complete_init(struct pciem_root_complex *v)
 
     vph_fill_config(v);
 
-    for (i = 0; i < PCI_STD_NUM_BARS; i++)
-    {
-        struct pciem_bar_info *bar = &v->bars[i];
-
-        if (bar->size == 0)
-        {
-            continue;
-        }
-
-        if (i > 0 && (i % 2 == 1) && (v->bars[i - 1].flags & PCI_BASE_ADDRESS_MEM_TYPE_64))
-        {
-            continue;
-        }
-
-        rc = pciem_reserve_bar_res(bar, i, &resources);
-        if (rc)
-            goto fail_res_list;
-    }
+    rc = pciem_reserve_bars_res(v, &resources);
+    if (rc)
+        goto fail_res_list;
 
     while (pci_find_bus(domain, busnr))
     {
