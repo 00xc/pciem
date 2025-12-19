@@ -7,6 +7,7 @@
 #include <asm/io.h>
 #include <asm/tlbflush.h>
 #include <linux/atomic.h>
+#include <linux/cleanup.h>
 #include <linux/delay.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
@@ -329,17 +330,15 @@ static ssize_t shim_read(struct file *file, char __user *buf, size_t count, loff
     {
         return -ERESTARTSYS;
     }
-    mutex_lock(&v->shim_lock);
+    guard(mutex)(&v->shim_lock);
     if (req_queue_get(v, &req))
     {
-        mutex_unlock(&v->shim_lock);
         if (copy_to_user(buf, &req, sizeof(req)))
         {
             return -EFAULT;
         }
         return sizeof(req);
     }
-    mutex_unlock(&v->shim_lock);
     return 0;
 }
 
@@ -355,9 +354,8 @@ static ssize_t shim_write(struct file *file, const char __user *buf, size_t coun
     {
         return -EFAULT;
     }
-    mutex_lock(&v->shim_lock);
+    guard(mutex)(&v->shim_lock);
     complete_req(v, resp.id, resp.data);
-    mutex_unlock(&v->shim_lock);
     return sizeof(resp);
 }
 
@@ -742,53 +740,38 @@ static long vph_ctrl_ioctl(struct file *file, unsigned int cmd, unsigned long ar
 {
     struct pciem_root_complex *v = g_vph;
     struct pciem_get_bar_args bar_args;
-    int ret = 0;
 
     if (!v)
     {
         return -ENODEV;
     }
 
-    mutex_lock(&v->ctrl_lock);
+    guard(mutex)(&v->ctrl_lock);
 
     switch (cmd)
     {
     case PCIEM_IOCTL_GET_BAR:
         if (copy_from_user(&bar_args, (void __user *)arg, sizeof(bar_args)))
-        {
-            ret = -EFAULT;
-            break;
-        }
+            return -EFAULT;
 
         if (bar_args.bar_index >= PCI_STD_NUM_BARS)
-        {
-            ret = -EINVAL;
-            break;
-        }
+            return -EINVAL;
 
         if (!v->bars[bar_args.bar_index].res)
-        {
-            ret = -ENODEV;
-            break;
-        }
+            return -ENODEV;
 
         bar_args.info.phys_start = (u64)v->bars[bar_args.bar_index].res->start;
         bar_args.info.size = (u64)resource_size(v->bars[bar_args.bar_index].res);
 
         if (copy_to_user((void __user *)arg, &bar_args, sizeof(bar_args)))
-        {
-            ret = -EFAULT;
-        }
-        else
-            ret = 0;
+            return -EFAULT;
         break;
 
     default:
-        ret = -EINVAL;
+        return -EINVAL;
     }
 
-    mutex_unlock(&v->ctrl_lock);
-    return ret;
+    return 0;
 }
 
 static const struct file_operations vph_ctrl_fops = {
@@ -1390,13 +1373,12 @@ static void __exit pciem_exit(void)
 {
     pr_info("exit: unloading pciem_hostbridge framework");
 
-    mutex_lock(&pciem_registration_lock);
+    guard(mutex)(&pciem_registration_lock);
 
     if (g_dev_ops)
     {
         pr_err("exit: pciem device plugin still registered! Cannot unload framework.");
         pr_err("exit: Please 'rmmod' the device plugin module first.");
-        mutex_unlock(&pciem_registration_lock);
         return;
     }
 
@@ -1406,7 +1388,6 @@ static void __exit pciem_exit(void)
         g_vph = NULL;
     }
 
-    mutex_unlock(&pciem_registration_lock);
     pr_info("exit: pciem framework done");
 }
 
@@ -1420,20 +1401,18 @@ int pciem_register_ops(struct pciem_epc_ops *ops)
         return -EINVAL;
     }
 
-    mutex_lock(&pciem_registration_lock);
+    guard(mutex)(&pciem_registration_lock);
 
     if (!g_vph)
     {
         pr_err("pciem framework is not loaded or already exiting.\n");
-        rc = -ENODEV;
-        goto out_unlock;
+        return -ENODEV;
     }
 
     if (g_dev_ops)
     {
         pr_err("A pciem device plugin is already registered.\n");
-        rc = -EBUSY;
-        goto out_unlock;
+        return -EBUSY;
     }
 
     g_dev_ops = ops;
@@ -1445,7 +1424,7 @@ int pciem_register_ops(struct pciem_epc_ops *ops)
     {
         pr_err("Failed to complete device initialization: %d\n", rc);
         g_dev_ops = NULL;
-        goto out_unlock;
+        return rc;
     }
 
     if (!try_module_get(THIS_MODULE))
@@ -1453,33 +1432,28 @@ int pciem_register_ops(struct pciem_epc_ops *ops)
         pr_err("Failed to get pciem framework module reference!\n");
         pciem_teardown_device(g_vph);
         g_dev_ops = NULL;
-        rc = -ENODEV;
-    }
-    else
-    {
-        pr_info("pciem device initialization complete.\n");
+        return -ENODEV;
     }
 
-out_unlock:
-    mutex_unlock(&pciem_registration_lock);
-    return rc;
+    pr_info("pciem device initialization complete.\n");
+    return 0;
 }
 EXPORT_SYMBOL(pciem_register_ops);
 
 void pciem_unregister_ops(struct pciem_epc_ops *ops)
 {
-    mutex_lock(&pciem_registration_lock);
+    guard(mutex)(&pciem_registration_lock);
 
     if (!g_vph)
     {
         pr_warn("pciem framework not loaded or already gone.\n");
-        goto out_unlock;
+        return;
     }
 
     if (g_dev_ops != ops)
     {
         pr_err("pciem: trying to unregister unknown device plugin!\n");
-        goto out_unlock;
+        return;
     }
 
     pr_info("Device plugin unregistering, tearing down device...\n");
@@ -1487,9 +1461,6 @@ void pciem_unregister_ops(struct pciem_epc_ops *ops)
     g_dev_ops = NULL;
     module_put(THIS_MODULE);
     pr_info("pciem device teardown complete.\n");
-
-out_unlock:
-    mutex_unlock(&pciem_registration_lock);
 }
 EXPORT_SYMBOL(pciem_unregister_ops);
 
