@@ -262,6 +262,27 @@ u64 pci_shim_read(u64 addr, u32 size)
 }
 EXPORT_SYMBOL(pci_shim_read);
 
+static void pciem_bus_copy_resources(struct pciem_root_complex *v)
+{
+    int i;
+    struct pciem_bar_info *bar;
+    struct pci_dev *dev __free(pci_dev_put) = pci_get_slot(v->root_bus, 0);
+
+    if (!dev)
+        return;
+
+    for (i = 0; i < PCI_STD_NUM_BARS; i++)
+    {
+        bar = &v->bars[i];
+        if (bar->size > 0 && bar->allocated_res)
+        {
+            dev->resource[i] = *bar->allocated_res;
+            dev->resource[i].flags |= IORESOURCE_BUSY;
+            bar->res = &dev->resource[i];
+        }
+    }
+}
+
 static int pciem_reserve_bar_res(struct pciem_bar_info *bar, int i, struct list_head *resources)
 {
     struct resource_entry *entry;
@@ -1183,22 +1204,7 @@ static int pciem_complete_init(struct pciem_root_complex *v)
     pci_bus_add_devices(v->root_bus);
 
     if (v->root_bus)
-    {
-        struct pci_dev *dev = pci_get_slot(v->root_bus, 0);
-        if (dev)
-        {
-            for (i = 0; i < PCI_STD_NUM_BARS; i++)
-            {
-                if (v->bars[i].size > 0 && v->bars[i].allocated_res)
-                {
-                    dev->resource[i] = *v->bars[i].allocated_res;
-                    dev->resource[i].flags |= IORESOURCE_BUSY;
-                    v->bars[i].res = &dev->resource[i];
-                }
-            }
-            pci_dev_put(dev);
-        }
-    }
+        pciem_bus_copy_resources(v);
 
     pci_bus_assign_resources(v->root_bus);
 
