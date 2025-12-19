@@ -295,6 +295,41 @@ static int pciem_map_bar_regular(struct pciem_bar_info *bar, int i)
     return -ENOMEM;
 }
 
+static int pciem_map_bars(struct pciem_root_complex *v, bool use_qemu_forwarding)
+{
+    int rc, i;
+    struct pciem_bar_info *bar, *prev = NULL;
+
+    for (i = 0; i < PCI_STD_NUM_BARS; i++)
+    {
+        bar = &v->bars[i];
+        if (i > 0)
+            prev = &v->bars[i - 1];
+
+        if (!bar->size)
+            continue;
+
+        if (i & 1 && prev && prev->flags & PCI_BASE_ADDRESS_MEM_TYPE_64)
+            continue;
+
+        bar->map_type = PCIEM_MAP_NONE;
+
+        if (use_qemu_forwarding)
+            rc = pciem_map_bar_qemu(bar, i);
+        else
+            rc = pciem_map_bar_regular(bar, i);
+
+        if (rc) {
+            pr_err("init: Failed to create any mapping for BAR%d", i);
+            return rc;
+        }
+
+        pr_info("init: BAR%d mapped at %px for emulator (map_type=%d)", i, bar->virt_addr, bar->map_type);
+    }
+
+    return 0;
+}
+
 static void pciem_cleanup_bar(struct pciem_bar_info *bar)
 {
     if (bar->virt_addr)
@@ -1192,35 +1227,9 @@ static int pciem_complete_init(struct pciem_root_complex *v)
         }
     }
 
-    for (i = 0; i < PCI_STD_NUM_BARS; i++)
-    {
-        struct pciem_bar_info *bar = &v->bars[i];
-
-        if (bar->size == 0)
-        {
-            continue;
-        }
-
-        if (i > 0 && (i % 2 == 1) && (v->bars[i - 1].flags & PCI_BASE_ADDRESS_MEM_TYPE_64))
-        {
-            continue;
-        }
-
-        bar->map_type = PCIEM_MAP_NONE;
-
-        if (use_qemu_forwarding)
-            rc = pciem_map_bar_qemu(bar, i);
-        else
-            rc = pciem_map_bar_regular(bar, i);
-
-        if (rc)
-        {
-            pr_err("init: Failed to create any mapping for BAR%d", i);
-            goto fail_map;
-        }
-
-        pr_info("init: BAR%d mapped at %px for emulator (map_type=%d)", i, bar->virt_addr, bar->map_type);
-    }
+    rc = pciem_map_bars(v, use_qemu_forwarding);
+    if (rc)
+        goto fail_map;
 
     v->shared_buf_size = SHARED_BUF_SIZE;
     v->shared_buf_vaddr =
