@@ -262,6 +262,39 @@ u64 pci_shim_read(u64 addr, u32 size)
 }
 EXPORT_SYMBOL(pci_shim_read);
 
+static int pciem_map_bar_qemu(struct pciem_bar_info *bar, int i)
+{
+    pr_info("init: BAR%d QEMU poller mapping as WC (ioremap_wc)", i);
+    bar->virt_addr = ioremap_wc(bar->phys_addr, bar->size);
+    if (!bar->virt_addr)
+    {
+        pr_err("init: BAR%d ioremap_wc() failed!", i);
+        return -ENOMEM;
+    }
+    bar->map_type = PCIEM_MAP_IOREMAP_WC;
+    return 0;
+}
+
+static int pciem_map_bar_regular(struct pciem_bar_info *bar, int i)
+{
+    bar->virt_addr = ioremap_cache(bar->phys_addr, bar->size);
+    if (bar->virt_addr)
+    {
+        bar->map_type = PCIEM_MAP_IOREMAP_CACHE;
+        return 0;
+    }
+
+    pr_warn("init: BAR%d ioremap_cache() failed; trying ioremap()", i);
+    bar->virt_addr = ioremap(bar->phys_addr, bar->size);
+    if (bar->virt_addr)
+    {
+        bar->map_type = PCIEM_MAP_IOREMAP;
+        return 0;
+    }
+
+    return -ENOMEM;
+}
+
 static void pciem_cleanup_bar(struct pciem_bar_info *bar)
 {
     if (bar->virt_addr)
@@ -1176,40 +1209,13 @@ static int pciem_complete_init(struct pciem_root_complex *v)
         bar->map_type = PCIEM_MAP_NONE;
 
         if (use_qemu_forwarding)
-        {
-            pr_info("init: BAR%d QEMU poller mapping as WC (ioremap_wc)", i);
-            bar->virt_addr = ioremap_wc(bar->phys_addr, bar->size);
-            if (bar->virt_addr)
-            {
-                bar->map_type = PCIEM_MAP_IOREMAP_WC;
-            }
-            else
-            {
-                pr_err("init: BAR%d ioremap_wc() failed!", i);
-                rc = -ENOMEM;
-                goto fail_map;
-            }
-        }
+            rc = pciem_map_bar_qemu(bar, i);
         else
-        {
-            bar->virt_addr = ioremap_cache(bar->phys_addr, bar->size);
-            if (bar->virt_addr)
-            {
-                bar->map_type = PCIEM_MAP_IOREMAP_CACHE;
-            }
-            else
-            {
-                pr_warn("init: BAR%d ioremap_cache() failed; trying ioremap()", i);
-                bar->virt_addr = ioremap(bar->phys_addr, bar->size);
-                if (bar->virt_addr)
-                    bar->map_type = PCIEM_MAP_IOREMAP;
-            }
-        }
+            rc = pciem_map_bar_regular(bar, i);
 
-        if (!bar->virt_addr)
+        if (rc)
         {
             pr_err("init: Failed to create any mapping for BAR%d", i);
-            rc = -ENOMEM;
             goto fail_map;
         }
 
