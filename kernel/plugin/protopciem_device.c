@@ -4,6 +4,7 @@
 #include <linux/io.h>
 #include <linux/module.h>
 #include <linux/pci.h>
+#include <linux/pci_ids.h>
 #include <linux/pci_regs.h>
 #include <linux/percpu.h>
 #include <linux/perf_event.h>
@@ -250,12 +251,11 @@ static void proto_poll_state(struct pciem_root_complex *v, bool proxy_irq_fired)
     if (!s)
         return;
 
-    u32 mem_val = ioread32(v->bars[0].virt_addr + REG_CMD);
+    void __iomem *bar0 = v->bars[0].virt_addr;
+    u32 mem_val = ioread32(bar0 + REG_CMD);
 
-    if (atomic_read(&v->guest_mmio_pending))
+    if (atomic_xchg(&v->guest_mmio_pending, 0))
     {
-        atomic_set(&v->guest_mmio_pending, 0);
-
         if (my_device_ops.set_command_watchpoint)
             my_device_ops.set_command_watchpoint(v, false);
     }
@@ -264,31 +264,31 @@ static void proto_poll_state(struct pciem_root_complex *v, bool proxy_irq_fired)
     {
         pr_info("fwd: New command issued: 0x%x\n", mem_val);
 
-        s->shadow_control = ioread32(v->bars[0].virt_addr + REG_CONTROL);
+        s->shadow_control = ioread32(bar0 + REG_CONTROL);
         if (pci_shim_write(REG_CONTROL, s->shadow_control, 4))
             goto cmd_error;
 
-        s->shadow_data = ioread32(v->bars[0].virt_addr + REG_DATA);
+        s->shadow_data = ioread32(bar0 + REG_DATA);
         if (pci_shim_write(REG_DATA, s->shadow_data, 4))
             goto cmd_error;
 
-        s->shadow_dma_src_lo = ioread32(v->bars[0].virt_addr + REG_DMA_SRC_LO);
+        s->shadow_dma_src_lo = ioread32(bar0 + REG_DMA_SRC_LO);
         if (pci_shim_write(REG_DMA_SRC_LO, s->shadow_dma_src_lo, 4))
             goto cmd_error;
 
-        s->shadow_dma_src_hi = ioread32(v->bars[0].virt_addr + REG_DMA_SRC_HI);
+        s->shadow_dma_src_hi = ioread32(bar0 + REG_DMA_SRC_HI);
         if (pci_shim_write(REG_DMA_SRC_HI, s->shadow_dma_src_hi, 4))
             goto cmd_error;
 
-        s->shadow_dma_dst_lo = ioread32(v->bars[0].virt_addr + REG_DMA_DST_LO);
+        s->shadow_dma_dst_lo = ioread32(bar0 + REG_DMA_DST_LO);
         if (pci_shim_write(REG_DMA_DST_LO, s->shadow_dma_dst_lo, 4))
             goto cmd_error;
 
-        s->shadow_dst_hi = ioread32(v->bars[0].virt_addr + REG_DMA_DST_HI);
+        s->shadow_dst_hi = ioread32(bar0 + REG_DMA_DST_HI);
         if (pci_shim_write(REG_DMA_DST_HI, s->shadow_dst_hi, 4))
             goto cmd_error;
 
-        s->shadow_dma_len = ioread32(v->bars[0].virt_addr + REG_DMA_LEN);
+        s->shadow_dma_len = ioread32(bar0 + REG_DMA_LEN);
         if (pci_shim_write(REG_DMA_LEN, s->shadow_dma_len, 4))
             goto cmd_error;
 
@@ -298,7 +298,7 @@ static void proto_poll_state(struct pciem_root_complex *v, bool proxy_irq_fired)
         s->shadow_cmd = mem_val;
         s->shadow_status = STATUS_BUSY;
 
-        iowrite32(STATUS_BUSY, v->bars[0].virt_addr + REG_STATUS);
+        iowrite32(STATUS_BUSY, bar0 + REG_STATUS);
         return;
     }
     else if (proxy_irq_fired && s->shadow_cmd != 0)
@@ -311,9 +311,9 @@ static void proto_poll_state(struct pciem_root_complex *v, bool proxy_irq_fired)
 
         s->shadow_cmd = 0;
 
-        iowrite32(s->shadow_result_lo, v->bars[0].virt_addr + REG_RESULT_LO);
-        iowrite32(s->shadow_result_hi, v->bars[0].virt_addr + REG_RESULT_HI);
-        iowrite32(s->shadow_status, v->bars[0].virt_addr + REG_STATUS);
+        iowrite32(s->shadow_result_lo, bar0 + REG_RESULT_LO);
+        iowrite32(s->shadow_result_hi, bar0 + REG_RESULT_HI);
+        iowrite32(s->shadow_status, bar0 + REG_STATUS);
 
         pciem_trigger_msi(v);
         if (my_device_ops.set_command_watchpoint)
@@ -333,7 +333,7 @@ static void proto_poll_state(struct pciem_root_complex *v, bool proxy_irq_fired)
 cmd_error:
     pr_err("fwd: shim write failed, aborting command\n");
     s->shadow_status = STATUS_ERROR | STATUS_DONE;
-    iowrite32(s->shadow_status, v->bars[0].virt_addr + REG_STATUS);
+    iowrite32(s->shadow_status, bar0 + REG_STATUS);
     s->shadow_cmd = 0;
     if (my_device_ops.set_command_watchpoint)
         my_device_ops.set_command_watchpoint(v, true);
@@ -352,17 +352,20 @@ static int proto_register_capabilities(struct pciem_root_complex *v)
     return 0;
 }
 
+#define pci_write(__ty, __ptr, __off, __val) do { *(__ty*)(__ptr + __off) = __val; } while(0)
+#define pci_write8(__ptr, __off, __val) pci_write(u8, __ptr, __off, __val)
+#define pci_write16(__ptr, __off, __val) pci_write(u16, __ptr, __off, __val)
+
 static void proto_fill_config(u8 *cfg)
 {
-    *(u16 *)&cfg[0x00] = PCIEM_PCI_VENDOR_ID;
-    *(u16 *)&cfg[0x02] = PCIEM_PCI_DEVICE_ID;
-    *(u16 *)&cfg[0x04] = PCI_COMMAND_MEMORY;
-    *(u16 *)&cfg[0x06] = PCI_STATUS_CAP_LIST;
-    cfg[0x08] = 0x00;
-    cfg[0x09] = 0x00;
-    cfg[0x0a] = 0x40;
-    cfg[0x0b] = 0x0b;
-    cfg[0x0e] = 0x00;
+    pci_write16(cfg, PCI_VENDOR_ID, PCIEM_PCI_VENDOR_ID);
+    pci_write16(cfg, PCI_DEVICE_ID, PCIEM_PCI_DEVICE_ID);
+    pci_write16(cfg, PCI_COMMAND, PCI_COMMAND_MEMORY);
+    pci_write16(cfg, PCI_STATUS, PCI_STATUS_CAP_LIST);
+    pci_write8(cfg, PCI_REVISION_ID, 0x00);
+    pci_write8(cfg, PCI_CLASS_PROG, 0x00);
+    pci_write16(cfg, PCI_CLASS_DEVICE, PCI_CLASS_PROCESSOR_CO);
+    pci_write8(cfg, PCI_HEADER_TYPE, PCI_HEADER_TYPE_NORMAL);
 }
 
 static int proto_register_bars(struct pciem_root_complex *v)
