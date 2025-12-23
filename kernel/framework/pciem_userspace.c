@@ -41,6 +41,52 @@ const struct file_operations pciem_device_fops = {
 };
 EXPORT_SYMBOL(pciem_device_fops);
 
+static int pciem_instance_mmap(struct file *file, struct vm_area_struct *vma)
+{
+    struct pciem_userspace_state *us = file->private_data;
+    struct pciem_bar_info *bar;
+    unsigned long size = vma->vm_end - vma->vm_start;
+
+    int bar_index = vma->vm_pgoff;
+
+    if (!us || !us->rc)
+        return -ENODEV;
+
+    if (bar_index < 0 || bar_index >= PCI_STD_NUM_BARS)
+    {
+        pr_err("pciem_instance: Invalid BAR index %d via mmap offset\n", bar_index);
+        return -EINVAL;
+    }
+
+    bar = &us->rc->bars[bar_index];
+
+    if (bar->size == 0 || bar->phys_addr == 0)
+    {
+        pr_err("pciem_instance: BAR%d is not active or has no physical address\n", bar_index);
+        return -EINVAL;
+    }
+
+    vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
+
+    if (remap_pfn_range(vma, vma->vm_start,
+                        bar->phys_addr >> PAGE_SHIFT,
+                        size, vma->vm_page_prot))
+    {
+        return -EAGAIN;
+    }
+
+    pr_debug("pciem_instance: Mapped BAR%d (phys: 0x%llx) to userspace via instance FD\n",
+            bar_index, (u64)bar->phys_addr);
+
+    return 0;
+}
+
+static const struct file_operations pciem_instance_fops = {
+    .owner = THIS_MODULE,
+    .mmap = pciem_instance_mmap,
+    .llseek = no_llseek,
+};
+
 static inline bool event_ring_empty(struct pciem_userspace_state *us)
 {
     return us->event_head == us->event_tail;
@@ -555,6 +601,7 @@ static long pciem_ioctl_register(struct pciem_userspace_state *us)
 {
     extern int pciem_complete_init(struct pciem_root_complex * v);
     int ret;
+    int fd;
 
     if (!us->rc)
         return -EINVAL;
@@ -576,9 +623,16 @@ static long pciem_ioctl_register(struct pciem_userspace_state *us)
     us->config_locked = true;
     us->registered = true;
 
-    pr_info("Userspace device registered successfully as instance %d\n", us->rc->instance_id);
+    fd = anon_inode_getfd("pciem_instance", &pciem_instance_fops, us, O_RDWR | O_CLOEXEC);
+    if (fd < 0) {
+        pr_err("Failed to create instance fd\n");
+        return fd;
+    }
 
-    return 0;
+    pr_info("Userspace device registered successfully as instance %d. Returning FD %d\n",
+            us->rc->instance_id, fd);
+
+    return fd;
 }
 
 static long pciem_ioctl_inject_irq(struct pciem_userspace_state *us, struct pciem_irq_inject __user *arg)

@@ -16,8 +16,6 @@
 #include "pciem_userspace.h"
 #include "protopciem_device.h"
 
-#define BAR0_PHYS_ADDR 0x1bf000000
-#define BAR2_PHYS_ADDR 0x1bf100000
 #define QEMU_SOCKET_PATH "/tmp/pciem_qemu.sock"
 
 #ifndef BIT
@@ -52,6 +50,7 @@ struct device_state
     size_t bar0_size;
     size_t bar2_size;
     int pciem_fd;
+    int instance_fd;
     int qemu_sock;
     volatile int running;
     int qemu_connected;
@@ -127,29 +126,29 @@ static int wait_for_qemu_connection(int listen_sock)
     return client_sock;
 }
 
-static int map_bars_phys(void)
+static int map_bars_via_fd(void)
 {
-    int mem_fd = open("/dev/mem", O_RDWR | O_SYNC);
-    if (mem_fd < 0)
+    dev_state.bar0_size = PCIEM_BAR0_SIZE;
+    dev_state.bar0 = mmap(NULL, dev_state.bar0_size, PROT_READ | PROT_WRITE,
+                          MAP_SHARED, dev_state.instance_fd, 0 * 4096);
+
+    if (dev_state.bar0 == MAP_FAILED)
     {
-        perror("Failed to open /dev/mem");
+        perror("mmap BAR0 failed");
         return -1;
     }
-
-    dev_state.bar0_size = PCIEM_BAR0_SIZE;
-    dev_state.bar0 = mmap(NULL, dev_state.bar0_size, PROT_READ | PROT_WRITE, MAP_SHARED, mem_fd, BAR0_PHYS_ADDR);
 
     dev_state.bar2_size = PCIEM_BAR2_SIZE;
-    dev_state.bar2 = mmap(NULL, dev_state.bar2_size, PROT_READ | PROT_WRITE, MAP_SHARED, mem_fd, BAR2_PHYS_ADDR);
+    dev_state.bar2 = mmap(NULL, dev_state.bar2_size, PROT_READ | PROT_WRITE,
+                          MAP_SHARED, dev_state.instance_fd, 2 * 4096);
 
-    close(mem_fd);
-
-    if (dev_state.bar0 == MAP_FAILED || dev_state.bar2 == MAP_FAILED)
+    if (dev_state.bar2 == MAP_FAILED)
     {
-        perror("mmap failed");
+        perror("mmap BAR2 failed");
         return -1;
     }
 
+    printf("[*] BARs mapped successfully via Instance FD\n");
     return 0;
 }
 
@@ -377,9 +376,15 @@ int main(void)
         .vendor_id = PCIEM_PCI_VENDOR_ID, .device_id = PCIEM_PCI_DEVICE_ID, .class_code = {0x00, 0x00, 0x0b}};
     ioctl(dev_state.pciem_fd, PCIEM_IOCTL_SET_CONFIG, &cfg);
 
-    ioctl(dev_state.pciem_fd, PCIEM_IOCTL_REGISTER, 0);
+    int ret_fd = ioctl(dev_state.pciem_fd, PCIEM_IOCTL_REGISTER, 0);
+    if (ret_fd < 0) {
+        perror("IOCTL_REGISTER failed");
+        goto cleanup;
+    }
+    dev_state.instance_fd = ret_fd;
+    printf("[*] Device registered, got instance FD: %d\n", dev_state.instance_fd);
 
-    if (map_bars_phys() < 0)
+    if (map_bars_via_fd() < 0)
         goto cleanup;
 
     listen_sock = create_qemu_socket();
@@ -463,8 +468,11 @@ cleanup:
         close(dev_state.qemu_sock);
     if (listen_sock >= 0)
         close(listen_sock);
+    if (dev_state.instance_fd >= 0)
+        close(dev_state.instance_fd);
     if (dev_state.pciem_fd >= 0)
         close(dev_state.pciem_fd);
+
     unlink(QEMU_SOCKET_PATH);
     return 0;
 }
