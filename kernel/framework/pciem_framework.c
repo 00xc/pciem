@@ -34,9 +34,9 @@
 #include "pciem_ops.h"
 #include "pciem_p2p.h"
 
-static int use_qemu_forwarding = 0;
-module_param(use_qemu_forwarding, int, 0644);
-MODULE_PARM_DESC(use_qemu_forwarding, "Use QEMU forwarding (1) or internal emulation (0)");
+static int pciem_mode = PCIEM_MODE_INTERNAL;
+module_param(pciem_mode, int, 0644);
+MODULE_PARM_DESC(pciem_mode, "Operation mode: 0=internal (default), 1=qemu forwarding, 2=userspace emulation");
 
 static char *pciem_phys_regions = "";
 module_param(pciem_phys_regions, charp, 0444);
@@ -52,6 +52,15 @@ static LIST_HEAD(pciem_devices);
 static DEFINE_MUTEX(pciem_devices_lock);
 static DEFINE_IDA(pciem_instance_ida);
 static DEFINE_MUTEX(pciem_registration_lock);
+
+static struct miscdevice pciem_main_dev;
+static const struct file_operations pciem_main_fops;
+
+int pciem_get_mode(void)
+{
+    return pciem_mode;
+}
+EXPORT_SYMBOL(pciem_get_mode);
 
 static void pciem_fixup_bridge_domain(struct pci_host_bridge *bridge, 
                                       struct pciem_host_bridge_priv *priv, 
@@ -373,9 +382,26 @@ static int pciem_map_bar_regular(struct pciem_bar_info *bar, int i)
     return -ENOMEM;
 }
 
-static int pciem_map_bars(struct pciem_root_complex *v, bool use_qemu_forwarding)
+static int pciem_map_bar_userspace(struct pciem_bar_info *bar, int i)
+{
+    pr_info("init: BAR%d userspace mode - lightweight kernel mapping", i);
+
+    bar->virt_addr = ioremap(bar->phys_addr, bar->size);
+    if (bar->virt_addr) {
+        bar->map_type = PCIEM_MAP_IOREMAP;
+        return 0;
+    }
+
+    pr_warn("init: BAR%d kernel mapping failed, continuing without it (userspace will map directly)", i);
+    bar->map_type = PCIEM_MAP_NONE;
+    bar->virt_addr = NULL;
+    return 0;
+}
+
+static int pciem_map_bars(struct pciem_root_complex *v)
 {
     int rc, i;
+    int mode = pciem_get_mode();
     struct pciem_bar_info *bar, *prev = NULL;
 
     for (i = 0; i < PCI_STD_NUM_BARS; i++)
@@ -392,17 +418,31 @@ static int pciem_map_bars(struct pciem_root_complex *v, bool use_qemu_forwarding
 
         bar->map_type = PCIEM_MAP_NONE;
 
-        if (use_qemu_forwarding)
+        switch (mode) {
+        case PCIEM_MODE_QEMU:
             rc = pciem_map_bar_qemu(bar, i);
-        else
+        break;
+        case PCIEM_MODE_USERSPACE:
+            rc = pciem_map_bar_userspace(bar, i);
+            break;
+        case PCIEM_MODE_INTERNAL:
+        default:
             rc = pciem_map_bar_regular(bar, i);
+            break;
+        }
 
         if (rc) {
-            pr_err("init: Failed to create any mapping for BAR%d", i);
+            pr_err("init: Failed to create mapping for BAR%d in mode %d", i, mode);
             return rc;
         }
 
-        pr_info("init: BAR%d mapped at %px for emulator (map_type=%d)", i, bar->virt_addr, bar->map_type);
+        if (bar->virt_addr) {
+            pr_info("init: BAR%d mapped at %px for emulator (map_type=%d)",
+                    i, bar->virt_addr, bar->map_type);
+        } else {
+            pr_info("init: BAR%d physical at 0x%llx (no kernel mapping)",
+                    i, (u64)bar->phys_addr);
+        }
     }
 
     return 0;
@@ -421,7 +461,9 @@ static void pciem_cleanup_bar(struct pciem_bar_info *bar)
     }
     if (bar->allocated_res && bar->mem_owned_by_framework)
     {
-        release_resource(bar->allocated_res);
+        if (bar->allocated_res->parent) {
+            release_resource(bar->allocated_res);
+        }
         kfree(bar->allocated_res->name);
         kfree(bar->allocated_res);
         bar->allocated_res = NULL;
@@ -1067,7 +1109,7 @@ static int vph_emulator_thread(void *arg)
     return 0;
 }
 
-static int pciem_complete_init(struct pciem_root_complex *v)
+int pciem_complete_init(struct pciem_root_complex *v)
 {
     int rc = 0;
     struct resource *mem_res = NULL;
@@ -1075,8 +1117,11 @@ static int pciem_complete_init(struct pciem_root_complex *v)
     int busnr = 1;
     int domain = 0;
     int i;
+    int mode = pciem_get_mode();
 
-    WARN_ON(!v->ops);
+    if (mode != PCIEM_MODE_USERSPACE) {
+        WARN_ON(!v->ops);
+    }
 
     char pdev_name[32];
     snprintf(pdev_name, sizeof(pdev_name), "%s.%d", DRIVER_NAME, v->instance_id);
@@ -1100,17 +1145,19 @@ static int pciem_complete_init(struct pciem_root_complex *v)
         pr_warn("pciem: P2P init failed: %d (non-fatal)\n", rc);
     }
 
-    if (!v->ops->register_bars)
-    {
-        pr_err("pciem: plugin has no register_bars op\n");
-        rc = -EINVAL;
-        goto fail_pdev;
-    }
-    rc = v->ops->register_bars(v);
-    if (rc)
-    {
-        pr_err("pciem: plugin register_bars failed: %d\n", rc);
-        goto fail_pdev;
+    if (mode != PCIEM_MODE_USERSPACE) {
+        if (!v->ops->register_bars)
+        {
+            pr_err("pciem: plugin has no register_bars op\n");
+            rc = -EINVAL;
+            goto fail_pdev;
+        }
+        rc = v->ops->register_bars(v);
+        if (rc)
+        {
+            pr_err("pciem: plugin register_bars failed: %d\n", rc);
+            goto fail_pdev;
+        }
     }
 
     for (i = 0; i < PCI_STD_NUM_BARS; i++)
@@ -1236,7 +1283,9 @@ static int pciem_complete_init(struct pciem_root_complex *v)
         }
     }
 
-    vph_fill_config(v);
+    if (mode != PCIEM_MODE_USERSPACE) {
+        vph_fill_config(v);
+    }
 
     rc = pciem_reserve_bars_res(v, &resources);
     if (rc)
@@ -1327,7 +1376,7 @@ static int pciem_complete_init(struct pciem_root_complex *v)
         goto fail_bus;
     }
 
-    if (use_qemu_forwarding)
+    if (pciem_get_mode() == PCIEM_MODE_QEMU)
     {
         pr_info("init: Registering shim misc device for forwarding\n");
         v->shim_miscdev.minor = MISC_DYNAMIC_MINOR;
@@ -1342,7 +1391,7 @@ static int pciem_complete_init(struct pciem_root_complex *v)
         }
     }
 
-    rc = pciem_map_bars(v, use_qemu_forwarding);
+    rc = pciem_map_bars(v);
     if (rc)
         goto fail_map;
 
@@ -1358,19 +1407,23 @@ static int pciem_complete_init(struct pciem_root_complex *v)
 
     memset(v->shared_buf_vaddr, 0, v->shared_buf_size);
 
-    v->emul_thread = kthread_run(vph_emulator_thread, v, "vph_emu/%d", v->instance_id);
-    if (IS_ERR(v->emul_thread))
-    {
-        rc = PTR_ERR(v->emul_thread);
-        pr_err("init: failed to start emulation thread: %d", rc);
-        goto fail_map;
+    if (mode != PCIEM_MODE_USERSPACE) {
+        v->emul_thread = kthread_run(vph_emulator_thread, v, "vph_emu/%d", v->instance_id);
+        if (IS_ERR(v->emul_thread))
+        {
+            rc = PTR_ERR(v->emul_thread);
+            pr_err("init: failed to start emulation thread: %d", rc);
+            goto fail_map;
+        }
+    } else {
+        v->emul_thread = NULL;
     }
 
     pr_info("init: pciem instance %d ready. ctrl: %s", v->instance_id, v->ctrl_dev_name);
     return 0;
 
 fail_map:
-    if (use_qemu_forwarding)
+    if (pciem_get_mode() == PCIEM_MODE_QEMU)
     {
         misc_deregister(&v->shim_miscdev);
     }
@@ -1396,6 +1449,7 @@ fail_pdev_null:
     v->pdev = NULL;
     return rc;
 }
+EXPORT_SYMBOL(pciem_complete_init);
 
 static void pciem_teardown_device(struct pciem_root_complex *v)
 {
@@ -1415,7 +1469,7 @@ static void pciem_teardown_device(struct pciem_root_complex *v)
         v->protopciem_pdev = NULL;
     }
 
-    if (use_qemu_forwarding)
+    if (pciem_get_mode() == PCIEM_MODE_QEMU)
     {
         misc_deregister(&v->shim_miscdev);
     }
@@ -1444,27 +1498,65 @@ static void pciem_teardown_device(struct pciem_root_complex *v)
 
 static int __init pciem_init(void)
 {
-    pr_info("init: pciem_hostbridge framework loading (forwarding: %s)", use_qemu_forwarding ? "YES" : "NO");
+    int ret;
+    int mode = pciem_get_mode();
+    const char *mode_names[] = {"INTERNAL", "QEMU", "USERSPACE"};
+    const char *mode_str = (mode >= 0 && mode < 3) ? mode_names[mode] : "UNKNOWN";
+
+    pr_info("init: pciem framework loading (mode: %s)\n", mode_str);
+
+    if (mode == PCIEM_MODE_USERSPACE) {
+        ret = pciem_userspace_init();
+        if (ret) {
+            pr_err("init: Failed to initialize userspace support: %d\n", ret);
+            goto fail_userspace;
+        }
+
+        pciem_main_dev.minor = MISC_DYNAMIC_MINOR;
+        pciem_main_dev.name = "pciem_main";
+        pciem_main_dev.fops = &pciem_main_fops;
+        pciem_main_dev.mode = 0666;
+
+        ret = misc_register(&pciem_main_dev);
+        if (ret) {
+            pr_err("init: Failed to register main device: %d\n", ret);
+            goto fail_misc;
+        }
+
+        pr_info("init: Created /dev/pciem_main for userspace device creation\n");
+    }
 
     ida_init(&pciem_instance_ida);
     INIT_LIST_HEAD(&pciem_devices);
 
     pr_info("init: pciem framework loaded. Waiting for device plugins.");
     return 0;
+
+fail_misc:
+    pciem_userspace_cleanup();
+fail_userspace:
+    return ret;
 }
 
 static void __exit pciem_exit(void)
 {
     struct pciem_root_complex *v, *tmp;
+    int mode = pciem_get_mode();
 
-    pr_info("exit: unloading pciem_hostbridge framework");
+    pr_info("exit: unloading pciem framework\n");
+
+    if (mode == PCIEM_MODE_USERSPACE) {
+        misc_deregister(&pciem_main_dev);
+        pciem_userspace_cleanup();
+        pr_info("exit: Unregistered /dev/pciem_main\n");
+    }
 
     guard(mutex)(&pciem_registration_lock);
 
     mutex_lock(&pciem_devices_lock);
     list_for_each_entry_safe(v, tmp, &pciem_devices, list_node)
     {
-        pr_warn("exit: forcibly cleaning up instance %d (owner should have unregistered!)\n", v->instance_id);
+        pr_warn("exit: forcibly cleaning up instance %d\n", v->instance_id);
         list_del(&v->list_node);
         pciem_teardown_device(v);
         ida_free(&pciem_instance_ida, v->instance_id);
@@ -1487,8 +1579,10 @@ struct pciem_root_complex *pciem_register_ops(struct pciem_epc_ops *ops)
 
     if (!ops)
     {
-        pr_err("Invalid (NULL) pciem_device_ops provided!\n");
-        return ERR_PTR(-EINVAL);
+        if (pciem_get_mode() != PCIEM_MODE_USERSPACE) {
+            pr_err("Invalid (NULL) pciem_device_ops provided!\n");
+            return ERR_PTR(-EINVAL);
+        }
     }
 
     guard(mutex)(&pciem_registration_lock);
@@ -1533,27 +1627,28 @@ struct pciem_root_complex *pciem_register_ops(struct pciem_epc_ops *ops)
 
     pr_info("Registering instance %d...\n", id);
 
-    rc = pciem_complete_init(v);
+    if (pciem_get_mode() != PCIEM_MODE_USERSPACE) {
+        rc = pciem_complete_init(v);
+        if (rc)
+        {
+            pr_err("Failed to complete device initialization: %d\n", rc);
+            ida_free(&pciem_instance_ida, id);
+            kfree(v->ctrl_dev_name);
+            kfree(v->shim_dev_name);
+            kfree(v);
+            return ERR_PTR(rc);
+        }
 
-    if (rc)
-    {
-        pr_err("Failed to complete device initialization: %d\n", rc);
-        ida_free(&pciem_instance_ida, id);
-        kfree(v->ctrl_dev_name);
-        kfree(v->shim_dev_name);
-        kfree(v);
-        return ERR_PTR(rc);
-    }
-
-    if (!try_module_get(THIS_MODULE))
-    {
-        pr_err("Failed to get pciem framework module reference!\n");
-        pciem_teardown_device(v);
-        ida_free(&pciem_instance_ida, id);
-        kfree(v->ctrl_dev_name);
-        kfree(v->shim_dev_name);
-        kfree(v);
-        return ERR_PTR(-ENODEV);
+        if (!try_module_get(THIS_MODULE))
+        {
+            pr_err("Failed to get pciem framework module reference!\n");
+            pciem_teardown_device(v);
+            ida_free(&pciem_instance_ida, id);
+            kfree(v->ctrl_dev_name);
+            kfree(v->shim_dev_name);
+            kfree(v);
+            return ERR_PTR(-ENODEV);
+        }
     }
 
     mutex_lock(&pciem_devices_lock);
@@ -1587,10 +1682,82 @@ void pciem_unregister_ops(struct pciem_root_complex *v)
     kfree(v->shim_dev_name);
     kfree(v);
 
-    module_put(THIS_MODULE);
+    if (pciem_get_mode() != PCIEM_MODE_USERSPACE) {
+        module_put(THIS_MODULE);
+    }
     pr_info("pciem device teardown complete.\n");
 }
 EXPORT_SYMBOL(pciem_unregister_ops);
+
+static int pciem_main_open(struct inode *inode, struct file *file)
+{
+    struct pciem_userspace_state *us;
+
+    if (pciem_get_mode() != PCIEM_MODE_USERSPACE) {
+        pr_err("Main device only available in userspace mode (mode=2)\n");
+        return -EINVAL;
+    }
+
+    us = pciem_userspace_create();
+    if (IS_ERR(us))
+        return PTR_ERR(us);
+
+    file->private_data = us;
+    return 0;
+}
+
+static long pciem_main_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
+{
+    return pciem_device_fops.unlocked_ioctl(file, cmd, arg);
+}
+
+static int pciem_main_release(struct inode *inode, struct file *file)
+{
+    if (pciem_device_fops.release)
+        return pciem_device_fops.release(inode, file);
+    return 0;
+}
+
+static ssize_t pciem_main_read(struct file *file, char __user *buf, size_t count, loff_t *ppos)
+{
+    if (pciem_device_fops.read)
+        return pciem_device_fops.read(file, buf, count, ppos);
+    return -EINVAL;
+}
+
+static ssize_t pciem_main_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos)
+{
+    if (pciem_device_fops.write)
+        return pciem_device_fops.write(file, buf, count, ppos);
+    return -EINVAL;
+}
+
+static __poll_t pciem_main_poll(struct file *file, struct poll_table_struct *wait)
+{
+    if (pciem_device_fops.poll)
+        return pciem_device_fops.poll(file, wait);
+    return 0;
+}
+
+static int pciem_main_mmap(struct file *file, struct vm_area_struct *vma)
+{
+    if (pciem_device_fops.mmap)
+        return pciem_device_fops.mmap(file, vma);
+    return -EINVAL;
+}
+
+static const struct file_operations pciem_main_fops = {
+    .owner = THIS_MODULE,
+    .open = pciem_main_open,
+    .release = pciem_main_release,
+    .read = pciem_main_read,
+    .write = pciem_main_write,
+    .poll = pciem_main_poll,
+    .unlocked_ioctl = pciem_main_ioctl,
+    .compat_ioctl = pciem_main_ioctl,
+    .mmap = pciem_main_mmap,
+    .llseek = no_llseek,
+};
 
 module_init(pciem_init);
 module_exit(pciem_exit);

@@ -28,6 +28,7 @@ struct pciem_host_bridge_priv {
 
 #include "pciem_p2p.h"
 #include "pciem_ioctl.h"
+#include "pciem_userspace.h"
 
 struct pciem_tlp
 {
