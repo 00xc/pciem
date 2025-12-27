@@ -152,5 +152,9 @@ int pci_shim_write(struct pciem_root_complex *v, u64 addr, u64 data, u32 size);
 int pciem_register_bar(struct pciem_root_complex *v, int bar_num, resource_size_t size, u32 flags, bool intercept_faults);
 struct pciem_root_complex *pciem_register_ops(struct pciem_epc_ops *ops);
 void pciem_unregister_ops(struct pciem_root_complex *v);
+int pciem_init_bar_tracking(void);
+void pciem_cleanup_bar_tracking(void);
+void pciem_disable_bar_tracking(void);
+void __iomem *pciem_get_driver_bar_vaddr(struct pci_dev *pdev, int bar);
 
 #endif /* PCIEM_FRAMEWORK_H */

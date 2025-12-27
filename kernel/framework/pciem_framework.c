@@ -1380,6 +1380,11 @@ static int __init pciem_init(void)
 
     pr_info("init: pciem framework loading (mode: %s)\n", mode_str);
 
+    ret = pciem_init_bar_tracking();
+    if (ret) {
+        pr_info("init: BAR tracking unavailable\n");
+    }
+
     if (mode == PCIEM_MODE_USERSPACE) {
         ret = pciem_userspace_init();
         if (ret) {
@@ -1442,6 +1447,8 @@ static void __exit pciem_exit(void)
     mutex_unlock(&pciem_devices_lock);
 
     ida_destroy(&pciem_instance_ida);
+
+    pciem_cleanup_bar_tracking();
 
     pr_info("exit: pciem framework done");
 }

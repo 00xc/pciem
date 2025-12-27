@@ -870,6 +870,60 @@ static void pciem_userspace_bp_handler(struct perf_event *bp, struct perf_sample
     pciem_userspace_queue_event(us, &event);
 }
 
+static void __iomem *pciem_resolve_bar_address(struct pci_dev *pdev, int bar_index, uint32_t flags)
+{
+    void __iomem *bar_base = NULL;
+    bool try_kprobes = true;
+    bool try_manual = true;
+
+    if (flags & PCIEM_WP_FLAG_BAR_KPROBES) {
+        try_manual = false;
+    } else if (flags & PCIEM_WP_FLAG_BAR_MANUAL) {
+        try_kprobes = false;
+    }
+
+    if (try_kprobes) {
+        bar_base = pciem_get_driver_bar_vaddr(pdev, bar_index);
+        if (bar_base) {
+            pr_debug("pciem_userspace: BAR%d resolved via kprobes\n", bar_index);
+            return bar_base;
+        }
+        if (!try_manual) {
+            pr_warn("pciem_userspace: BAR%d not found via kprobes (kprobes-only mode)\n", bar_index);
+            return NULL;
+        }
+    }
+
+    if (try_manual) {
+        void *drvdata = pci_get_drvdata(pdev);
+        if (drvdata) {
+            /*
+                FIXME?:
+
+                This assumes that the driver's private data structure is as follows:
+
+                struct drvdata {
+                    struct pci_dev *pdev;
+                    void __iomem *bars[x];
+                    ...
+                };
+            */
+            void __iomem **bar_array = (void __iomem **)((char *)drvdata + sizeof(struct pci_dev *));
+            bar_base = bar_array[bar_index];
+            if (bar_base) {
+                pr_debug("pciem_userspace: BAR%d resolved via manual method\n", bar_index);
+                return bar_base;
+            }
+        }
+        if (!try_kprobes) {
+            pr_warn("pciem_userspace: BAR%d not found via manual method (manual-only mode)\n", bar_index);
+            return NULL;
+        }
+    }
+    
+    return NULL;
+}
+
 static long pciem_ioctl_set_watchpoint(struct pciem_userspace_state *us, struct pciem_watchpoint_config __user *arg)
 {
     struct pciem_watchpoint_config cfg;
@@ -952,20 +1006,16 @@ static long pciem_ioctl_set_watchpoint(struct pciem_userspace_state *us, struct 
         return -ENODEV;
     }
 
-    drvdata = pci_get_drvdata(pdev);
-    if (!drvdata)
-    {
-        pr_warn("pciem_userspace: Driver not probed yet (no drvdata)\n");
-        return -EAGAIN;
-    }
-
-    void __iomem **bar_array = (void __iomem **)((char *)drvdata + sizeof(struct pci_dev *));
-    bar_base = bar_array[cfg.bar_index];
+    bar_base = pciem_resolve_bar_address(pdev, cfg.bar_index, cfg.flags);
 
     if (!bar_base)
     {
-        pr_err("pciem_userspace: Driver hasn't mapped BAR%d yet\n", cfg.bar_index);
-        return -EFAULT;
+        const char *method_str = 
+            (cfg.flags & PCIEM_WP_FLAG_BAR_KPROBES) ? " (kprobes-only)" :
+            (cfg.flags & PCIEM_WP_FLAG_BAR_MANUAL) ? " (manual-only)" : "";
+        pr_err("pciem_userspace: Could not locate BAR%d mapping%s\n", 
+               cfg.bar_index, method_str);
+        return -EAGAIN;
     }
 
     target_va = bar_base + cfg.offset;
@@ -1014,6 +1064,11 @@ static long pciem_ioctl_set_watchpoint(struct pciem_userspace_state *us, struct 
 
     pr_info("pciem_userspace: Watchpoint[%d] enabled on BAR%d+0x%x (VA %px, width %d)\n", wp_slot, cfg.bar_index,
             cfg.offset, target_va, cfg.width);
+
+    if (!us->bar_tracking_disabled) {
+        pciem_disable_bar_tracking();
+        us->bar_tracking_disabled = true;
+    }
 
     return 0;
 }

@@ -164,6 +164,9 @@ struct pciem_watchpoint_config
     uint32_t flags;
 };
 
+#define PCIEM_WP_FLAG_BAR_KPROBES  (1 << 0)
+#define PCIEM_WP_FLAG_BAR_MANUAL   (1 << 1)
+
 struct pciem_eventfd_config
 {
     int32_t eventfd;
@@ -234,6 +237,8 @@ struct pciem_userspace_state
 
     struct eventfd_ctx *eventfd;
     spinlock_t eventfd_lock;
+
+    bool bar_tracking_disabled;
 };
 
 struct pciem_pending_request
