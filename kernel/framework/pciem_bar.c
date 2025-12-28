@@ -175,7 +175,7 @@ int pciem_init_bar_tracking(void)
         return -ENODEV;
     }
 
-    pr_info("PCIem: BAR tracking active (%d/%d probes)\n", NUM_PROBES - failed, NUM_PROBES);
+    pr_info("PCIem: BAR tracking active (%lu/%lu probes)\n", NUM_PROBES - failed, NUM_PROBES);
     return 0;
 }
 

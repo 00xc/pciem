@@ -136,34 +136,6 @@ static bool event_ring_pop(struct pciem_userspace_state *us, struct pciem_event 
     return ret;
 }
 
-static struct pciem_pending_request *alloc_pending_request(struct pciem_userspace_state *us)
-{
-    struct pciem_pending_request *req;
-    unsigned long flags;
-    uint64_t seq;
-    int hash;
-
-    req = kzalloc(sizeof(*req), GFP_KERNEL);
-    if (!req)
-        return NULL;
-
-    spin_lock_irqsave(&us->pending_lock, flags);
-    seq = us->next_seq++;
-    spin_unlock_irqrestore(&us->pending_lock, flags);
-
-    req->seq = seq;
-    init_completion(&req->done);
-    req->response_status = -ETIMEDOUT;
-
-    hash = (int)(seq % ARRAY_SIZE(us->pending_requests));
-
-    spin_lock_irqsave(&us->pending_lock, flags);
-    hlist_add_head(&req->node, &us->pending_requests[hash]);
-    spin_unlock_irqrestore(&us->pending_lock, flags);
-
-    return req;
-}
-
 static void free_pending_request(struct pciem_userspace_state *us, struct pciem_pending_request *req)
 {
     unsigned long flags;
@@ -361,8 +333,8 @@ static int pciem_device_release(struct inode *inode, struct file *file)
     {
         if (us->rc && us->registered)
         {
-            pr_info("Cleaning up registered device instance %d\n", us->rc->instance_id);
-            pciem_unregister_ops(us->rc);
+            pr_info("Cleaning up registered device instance\n");
+            pciem_free_root_complex(us->rc);
             us->rc = NULL;
         }
 
@@ -491,7 +463,7 @@ static long pciem_ioctl_create_device(struct pciem_userspace_state *us, struct p
         return -EINVAL;
     }
 
-    us->rc = pciem_register_ops(NULL);
+    us->rc = pciem_alloc_root_complex();
     if (IS_ERR(us->rc))
     {
         int ret = PTR_ERR(us->rc);
@@ -501,9 +473,7 @@ static long pciem_ioctl_create_device(struct pciem_userspace_state *us, struct p
 
     pciem_init_cap_manager(us->rc);
 
-    us->rc->device_private_data = us;
-
-    pr_info("Created userspace device instance %d\n", us->rc->instance_id);
+    pr_info("Created userspace device instance\n");
 
     return 0;
 }
@@ -667,8 +637,8 @@ static long pciem_ioctl_register(struct pciem_userspace_state *us)
         return fd;
     }
 
-    pr_info("Userspace device registered successfully as instance %d. Returning FD %d\n",
-            us->rc->instance_id, fd);
+    pr_info("Userspace device registered successfully, returning FD %d\n",
+            fd);
 
     return fd;
 }
@@ -928,7 +898,6 @@ static long pciem_ioctl_set_watchpoint(struct pciem_userspace_state *us, struct 
 {
     struct pciem_watchpoint_config cfg;
     struct pci_dev *pdev;
-    void *drvdata;
     void __iomem *bar_base;
     void __iomem *target_va;
     struct perf_event_attr attr;
