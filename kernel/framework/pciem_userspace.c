@@ -449,19 +449,8 @@ static int pciem_device_mmap(struct file *file, struct vm_area_struct *vma)
 
 static long pciem_ioctl_create_device(struct pciem_userspace_state *us, struct pciem_create_device __user *arg)
 {
-    struct pciem_create_device create;
-
     if (us->rc)
         return -EBUSY;
-
-    if (copy_from_user(&create, arg, sizeof(create)))
-        return -EFAULT;
-
-    if (create.mode != PCIEM_MODE_USERSPACE)
-    {
-        pr_err("Invalid mode %d for userspace device creation\n", create.mode);
-        return -EINVAL;
-    }
 
     us->rc = pciem_alloc_root_complex();
     if (IS_ERR(us->rc))
@@ -501,14 +490,11 @@ static long pciem_ioctl_add_bar(struct pciem_userspace_state *us, struct pciem_b
         return -EINVAL;
     }
 
-    bool intercept_faults = (cfg.intercept == PCIEM_BAR_INTERCEPT_FAULT);
-
-    ret = pciem_register_bar(us->rc, cfg.bar_index, cfg.size, cfg.flags, intercept_faults);
+    ret = pciem_register_bar(us->rc, cfg.bar_index, cfg.size, cfg.flags);
 
     if (ret == 0)
     {
-        pr_info("Registered BAR%d: size=0x%llx, flags=0x%x, intercept=%d\n", cfg.bar_index, cfg.size, cfg.flags,
-                cfg.intercept);
+        pr_info("Registered BAR%d: size=0x%llx, flags=0x%x\n", cfg.bar_index, cfg.size, cfg.flags);
     }
 
     return ret;

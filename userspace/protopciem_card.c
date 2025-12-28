@@ -418,20 +418,18 @@ int main(void)
     sigaction(SIGINT, &sa, NULL);
     sigaction(SIGTERM, &sa, NULL);
 
-    struct pciem_create_device create = {.mode = PCIEM_MODE_USERSPACE};
+    struct pciem_create_device create;
     ioctl(dev_state.pciem_fd, PCIEM_IOCTL_CREATE_DEVICE, &create);
 
     struct pciem_bar_config bar0 = {.bar_index = 0,
                                     .size = PCIEM_BAR0_SIZE,
-                                    .flags = PCI_BASE_ADDRESS_SPACE_MEMORY | PCI_BASE_ADDRESS_MEM_TYPE_64,
-                                    .intercept = PCIEM_BAR_INTERCEPT_WRITE};
+                                    .flags = PCI_BASE_ADDRESS_SPACE_MEMORY | PCI_BASE_ADDRESS_MEM_TYPE_64};
     ioctl(dev_state.pciem_fd, PCIEM_IOCTL_ADD_BAR, &bar0);
 
     struct pciem_bar_config bar2 = {.bar_index = 2,
                                     .size = PCIEM_BAR2_SIZE,
                                     .flags = PCI_BASE_ADDRESS_SPACE_MEMORY | PCI_BASE_ADDRESS_MEM_TYPE_64 |
-                                             PCI_BASE_ADDRESS_MEM_PREFETCH,
-                                    .intercept = PCIEM_BAR_INTERCEPT_NONE};
+                                             PCI_BASE_ADDRESS_MEM_PREFETCH};
     ioctl(dev_state.pciem_fd, PCIEM_IOCTL_ADD_BAR, &bar2);
 
     struct pciem_cap_msi_userspace msi_data = {.has_64bit = 1, .has_masking = 1};

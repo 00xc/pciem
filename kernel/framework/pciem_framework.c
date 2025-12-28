@@ -100,7 +100,7 @@ static int parse_phys_regions(struct pciem_root_complex *v)
     return 0;
 }
 
-int pciem_register_bar(struct pciem_root_complex *v, int bar_num, resource_size_t size, u32 flags, bool intercept_faults)
+int pciem_register_bar(struct pciem_root_complex *v, int bar_num, resource_size_t size, u32 flags)
 {
     if (bar_num < 0 || bar_num >= PCI_STD_NUM_BARS)
     {
@@ -111,7 +111,6 @@ int pciem_register_bar(struct pciem_root_complex *v, int bar_num, resource_size_
     {
         v->bars[bar_num].size = 0;
         v->bars[bar_num].flags = 0;
-        v->bars[bar_num].intercept_page_faults = false;
         return 0;
     }
 
@@ -124,10 +123,8 @@ int pciem_register_bar(struct pciem_root_complex *v, int bar_num, resource_size_
     v->bars[bar_num].size = size;
     v->bars[bar_num].flags = flags;
     v->bars[bar_num].base_addr_val = 0;
-    v->bars[bar_num].intercept_page_faults = intercept_faults;
 
-    pr_info("pciem: Registered BAR %d: size 0x%llx, flags 0x%x, fault_intercept=%d\n", bar_num, (u64)size, flags,
-            intercept_faults);
+    pr_info("pciem: Registered BAR %d: size 0x%llx, flags 0x%x\n", bar_num, (u64)size, flags);
 
     return 0;
 }

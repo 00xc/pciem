@@ -12,17 +12,9 @@
 typedef atomic_int atomic_t;
 #endif
 
-enum pciem_mode
-{
-    PCIEM_MODE_INTERNAL = 0,
-    PCIEM_MODE_QEMU = 1,
-    PCIEM_MODE_USERSPACE = 2,
-};
-
 struct pciem_create_device
 {
     uint32_t flags;
-    uint32_t mode;
 };
 
 struct pciem_bar_config
@@ -30,14 +22,8 @@ struct pciem_bar_config
     uint32_t bar_index;
     uint32_t flags;
     uint64_t size;
-    uint32_t intercept;
     uint32_t reserved;
 };
-
-#define PCIEM_BAR_INTERCEPT_NONE 0
-#define PCIEM_BAR_INTERCEPT_ALL 1
-#define PCIEM_BAR_INTERCEPT_WRITE 2
-#define PCIEM_BAR_INTERCEPT_FAULT 3
 
 struct pciem_cap_config
 {
