@@ -38,7 +38,6 @@ const struct file_operations pciem_device_fops = {
     .unlocked_ioctl = pciem_device_ioctl,
     .compat_ioctl = pciem_device_ioctl,
     .mmap = pciem_device_mmap,
-    .llseek = no_llseek,
 };
 EXPORT_SYMBOL(pciem_device_fops);
 
@@ -85,7 +84,6 @@ static int pciem_instance_mmap(struct file *file, struct vm_area_struct *vma)
 static const struct file_operations pciem_instance_fops = {
     .owner = THIS_MODULE,
     .mmap = pciem_instance_mmap,
-    .llseek = no_llseek,
 };
 
 static inline bool event_ring_empty(struct pciem_userspace_state *us)
