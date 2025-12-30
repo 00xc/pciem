@@ -265,10 +265,7 @@ void pciem_userspace_queue_event(struct pciem_userspace_state *us, struct pciem_
 
         if (next_tail != head) {
             memcpy(&us->shared_ring->events[tail], event, sizeof(*event));
-
-            smp_wmb();
-
-            atomic_set(&us->shared_ring->tail, next_tail);
+            atomic_set_release(&us->shared_ring->tail, next_tail);
         }
     }
 
