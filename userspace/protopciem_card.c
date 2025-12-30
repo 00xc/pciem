@@ -486,9 +486,13 @@ int main(void)
                                              PCI_BASE_ADDRESS_MEM_PREFETCH};
     ioctl(dev_state.pciem_fd, PCIEM_IOCTL_ADD_BAR, &bar2);
 
-    struct pciem_cap_msi_userspace msi_data = {.has_64bit = 1, .has_masking = 1};
-    struct pciem_cap_config msi = {.cap_type = PCIEM_CAP_MSI, .cap_size = sizeof(msi_data)};
-    memcpy(msi.cap_data, &msi_data, sizeof(msi_data));
+    struct pciem_cap_config msi = {
+        .cap_type = PCIEM_CAP_MSI,
+        .msi = {
+            .has_64bit = 1,
+            .has_masking = 1,
+        },
+    };
     ioctl(dev_state.pciem_fd, PCIEM_IOCTL_ADD_CAPABILITY, &msi);
 
     struct pciem_config_space cfg = {
