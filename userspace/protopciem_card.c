@@ -389,6 +389,54 @@ static int setup_eventfd(void)
     return 0;
 }
 
+static void init_device(struct device_state *st)
+{
+    st->pciem_fd = -1;
+
+    pthread_mutex_init(&st->sock_lock, NULL);
+    pthread_cond_init(&st->ack_cond, NULL);
+
+    st->instance_fd = -1;
+    st->running = 0;
+    st->qemu_connected = 0;
+
+    st->event_ring = MAP_FAILED;
+    st->bar0 = MAP_FAILED;
+    st->bar2 = MAP_FAILED;
+
+    st->qemu_sock = -1;
+    st->dma_bounce_buf = NULL;
+    st->event_fd = -1;
+}
+
+static void destroy_device(struct device_state *st)
+{
+    if (st->event_fd >= 0)
+        close(st->event_fd);
+
+    if (st->dma_bounce_buf)
+        free(st->dma_bounce_buf);
+
+    if (st->qemu_sock >= 0)
+        close(st->qemu_sock);
+
+    if (st->event_ring != MAP_FAILED)
+        munmap(st->event_ring, sizeof(struct pciem_shared_ring));
+    if (st->bar2 != MAP_FAILED)
+        munmap((void *)st->bar2, st->bar2_size);
+    if (st->bar0 != MAP_FAILED)
+        munmap((void *)st->bar0, st->bar0_size);
+
+    if (st->instance_fd >= 0)
+        close(st->instance_fd);
+
+    pthread_mutex_destroy(&st->sock_lock);
+    pthread_cond_destroy(&st->ack_cond);
+
+    if (st->pciem_fd >= 0)
+        close(st->pciem_fd);
+}
+
 int main(void)
 {
     int listen_sock = -1;
@@ -400,18 +448,14 @@ int main(void)
         return 1;
     }
 
+    init_device(&dev_state);
+
     dev_state.pciem_fd = open("/dev/pciem", O_RDWR);
     if (dev_state.pciem_fd < 0)
     {
         perror("Failed to open /dev/pciem");
         return 1;
     }
-
-    dev_state.event_fd = -1;
-    dev_state.running = 1;
-    dev_state.qemu_connected = 0;
-    pthread_mutex_init(&dev_state.sock_lock, NULL);
-    pthread_cond_init(&dev_state.ack_cond, NULL);
 
     memset(&sa, 0, sizeof(sa));
     sa.sa_handler = signal_handler;
@@ -609,26 +653,14 @@ cleanup:
         if (dev_state.dma_bounce_buf)
         {
             free(dev_state.dma_bounce_buf);
+            dev_state.dma_bounce_buf = NULL;
         }
     }
 
-    if (dev_state.event_ring && dev_state.event_ring != MAP_FAILED)
-        munmap((void*)dev_state.event_ring, sizeof(struct pciem_shared_ring));
-    if (dev_state.bar0 && dev_state.bar0 != MAP_FAILED)
-        munmap((void*)dev_state.bar0, dev_state.bar0_size);
-    if (dev_state.bar2 && dev_state.bar2 != MAP_FAILED)
-        munmap((void*)dev_state.bar2, dev_state.bar2_size);
-
-    if (dev_state.qemu_sock >= 0)
-        close(dev_state.qemu_sock);
     if (listen_sock >= 0)
         close(listen_sock);
-    if (dev_state.event_fd >= 0)
-        close(dev_state.event_fd);
-    if (dev_state.instance_fd >= 0)
-        close(dev_state.instance_fd);
-    if (dev_state.pciem_fd >= 0)
-        close(dev_state.pciem_fd);
+
+    destroy_device(&dev_state);
 
     unlink(QEMU_SOCKET_PATH);
     return 0;
