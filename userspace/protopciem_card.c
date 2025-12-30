@@ -400,6 +400,40 @@ static int setup_eventfd(void)
     return 0;
 }
 
+static void handle_bar0_write(struct device_state *st, struct pciem_event *event)
+{
+    volatile uint32_t *bar0 = st->bar0;
+
+    switch (event->offset)
+    {
+    case REG_CMD: {
+        uint32_t cmd = bar0[REG_CMD / 4];
+
+        if (!cmd)
+            return;
+
+        bar0[REG_STATUS / 4] = STATUS_BUSY;
+        if (st->qemu_connected &&
+            (cmd == CMD_EXECUTE_CMDBUF || cmd == CMD_DMA_FRAME))
+        {
+            if (forward_command_to_qemu() < 0)
+                printf("[!] Failed to forward command to QEMU!\n");
+        } else {
+            process_command_local();
+        }
+        break;
+    }
+    default:
+        return;
+    }
+}
+
+static void handle_event(struct device_state *st, struct pciem_event *event)
+{
+    if (event->type == PCIEM_EVENT_MMIO_WRITE && event->bar == 0)
+        handle_bar0_write(st, event);
+}
+
 static int register_device(struct device_state *st)
 {
     struct pciem_create_device create = {0};
@@ -648,28 +682,7 @@ int main(void)
         struct pciem_event *event = &dev_state.event_ring->events[head];
 
         atomic_thread_fence(memory_order_acquire);
-
-        if (event->type == PCIEM_EVENT_MMIO_WRITE && event->bar == 0)
-        {
-            if (event->offset == REG_CMD)
-            {
-                uint32_t cmd = dev_state.bar0[REG_CMD / 4];
-                if (cmd != 0)
-                {
-                    dev_state.bar0[REG_STATUS / 4] = STATUS_BUSY;
-                    if (dev_state.qemu_connected && (cmd == CMD_EXECUTE_CMDBUF || cmd == CMD_DMA_FRAME))
-                    {
-                        if (forward_command_to_qemu() < 0) {
-                            printf("[!] Failed to forward command to QEMU!\n");
-                        }
-                    }
-                    else
-                    {
-                        process_command_local();
-                    }
-                }
-            }
-        }
+        handle_event(&dev_state, event);
         atomic_store(&dev_state.event_ring->head, (head + 1) % PCIEM_RING_SIZE);
     }
 
