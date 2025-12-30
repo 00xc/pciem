@@ -249,6 +249,45 @@ void pciem_userspace_destroy(struct pciem_userspace_state *us)
     kfree(us);
 }
 
+static int pciem_shared_ring_alloc(struct pciem_userspace_state *us)
+{
+    int order = get_order(sizeof(struct pciem_shared_ring));
+
+    us->shared_ring_page = alloc_pages(GFP_KERNEL | __GFP_ZERO | __GFP_COMP, order);
+    if (!us->shared_ring_page)
+        return -ENOMEM;
+
+    us->shared_ring = page_address(us->shared_ring_page);
+    atomic_set(&us->shared_ring->head, 0);
+    atomic_set(&us->shared_ring->tail, 0);
+    spin_lock_init(&us->shared_ring_lock);
+
+    return 0;
+}
+
+static bool pciem_shared_ring_push(struct pciem_userspace_state *us,
+                                   struct pciem_event *event)
+{
+    int tail, next_tail, head;
+
+    if (!us->shared_ring)
+        return true;
+
+    guard(spinlock_irqsave)(&us->shared_ring_lock);
+
+    tail = atomic_read(&us->shared_ring->tail);
+    next_tail = (tail + 1) % PCIEM_RING_SIZE;
+    head = atomic_read(&us->shared_ring->head);
+
+    if (next_tail == head)
+        return false;
+
+    memcpy(&us->shared_ring->events[tail], event, sizeof(*event));
+    atomic_set_release(&us->shared_ring->tail, next_tail);
+
+    return true;
+}
+
 void pciem_userspace_queue_event(struct pciem_userspace_state *us, struct pciem_event *event)
 {
     unsigned long flags;
@@ -258,16 +297,9 @@ void pciem_userspace_queue_event(struct pciem_userspace_state *us, struct pciem_
 
     event->timestamp = ktime_get_ns();
 
-    if (us->shared_ring) {
-        int tail = atomic_read(&us->shared_ring->tail);
-        int next_tail = (tail + 1) % PCIEM_RING_SIZE;
-        int head = atomic_read(&us->shared_ring->head);
-
-        if (next_tail != head) {
-            memcpy(&us->shared_ring->events[tail], event, sizeof(*event));
-            atomic_set_release(&us->shared_ring->tail, next_tail);
-        }
-    }
+    if (!pciem_shared_ring_push(us, event))
+        pr_warn_ratelimited("Shared ring buffer full, dropping event for userspace (seq=%llu)\n",
+                            event->seq);
 
     if (!event_ring_push(us, event))
     {
@@ -427,15 +459,9 @@ static int pciem_device_mmap(struct file *file, struct vm_area_struct *vma)
 
     if (!us->shared_ring_page)
     {
-        int order = get_order(sizeof(struct pciem_shared_ring));
-
-        us->shared_ring_page = alloc_pages(GFP_KERNEL | __GFP_ZERO | __GFP_COMP, order);
-        if (!us->shared_ring_page)
-            return -ENOMEM;
-
-        us->shared_ring = page_address(us->shared_ring_page);
-        atomic_set(&us->shared_ring->head, 0);
-        atomic_set(&us->shared_ring->tail, 0);
+        ret = pciem_shared_ring_alloc(us);
+        if (ret)
+            return ret;
     }
 
     pfn = page_to_pfn(us->shared_ring_page);
