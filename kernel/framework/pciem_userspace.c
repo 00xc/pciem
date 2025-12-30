@@ -13,6 +13,7 @@
 #include <linux/poll.h>
 #include <linux/slab.h>
 #include <linux/uaccess.h>
+#include <linux/version.h>
 
 #include "pciem_capabilities.h"
 #include "pciem_dma.h"
@@ -283,7 +284,11 @@ void pciem_userspace_queue_event(struct pciem_userspace_state *us, struct pciem_
     spin_lock_irqsave(&us->eventfd_lock, flags);
     if (us->eventfd)
     {
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(6,7,0)
         eventfd_signal(us->eventfd, 1);
+#else
+        eventfd_signal(us->eventfd);
+#endif
     }
     spin_unlock_irqrestore(&us->eventfd_lock, flags);
 
