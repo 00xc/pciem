@@ -448,6 +448,37 @@ static int register_device(struct device_state *st)
     return 0;
 }
 
+static int map_device(struct device_state *st)
+{
+    st->bar0_size = PCIEM_BAR0_SIZE;
+    st->bar0 = mmap(NULL, dev_state.bar0_size, PROT_READ | PROT_WRITE,
+                    MAP_SHARED, st->instance_fd, 0 * 4096);
+    if (st->bar0 == MAP_FAILED) {
+        warn("mmap BAR0 failed");
+        return -1;
+    }
+
+    st->bar2_size = PCIEM_BAR2_SIZE;
+    st->bar2 = mmap(NULL, dev_state.bar2_size, PROT_READ | PROT_WRITE,
+                    MAP_SHARED, st->instance_fd, 2 * 4096);
+    if (st->bar2 == MAP_FAILED) {
+        warn("mmap BAR2 failed");
+        return -1;
+    }
+
+    printf("[\x1b[32m*\x1b[0m] BARs mapped successfully via Instance FD\n");
+
+    st->event_ring = mmap(NULL, sizeof(struct pciem_shared_ring),
+                          PROT_READ | PROT_WRITE, MAP_SHARED,
+                          st->pciem_fd, 0);
+    if (st->event_ring == MAP_FAILED) {
+        warn("mmap shared event ring failed");
+        return -1;
+    }
+
+    return 0;
+}
+
 static void init_device(struct device_state *st)
 {
     st->pciem_fd = -1;
@@ -514,39 +545,13 @@ int main(void)
     printf("[\x1b[32m*\x1b[0m] Device registered, got instance FD: %d\n",
        dev_state.instance_fd);
 
+    if (map_device(&dev_state) < 0)
+        goto cleanup;
+
     memset(&sa, 0, sizeof(sa));
     sa.sa_handler = signal_handler;
     sigaction(SIGINT, &sa, NULL);
     sigaction(SIGTERM, &sa, NULL);
-
-    dev_state.bar0_size = PCIEM_BAR0_SIZE;
-    dev_state.bar0 = mmap(NULL, dev_state.bar0_size, PROT_READ | PROT_WRITE,
-                          MAP_SHARED, dev_state.instance_fd, 0 * 4096);
-
-    if (dev_state.bar0 == MAP_FAILED)
-    {
-        perror("mmap BAR0 failed");
-        return -1;
-    }
-
-    dev_state.bar2_size = PCIEM_BAR2_SIZE;
-    dev_state.bar2 = mmap(NULL, dev_state.bar2_size, PROT_READ | PROT_WRITE,
-                          MAP_SHARED, dev_state.instance_fd, 2 * 4096);
-
-    if (dev_state.bar2 == MAP_FAILED)
-    {
-        perror("mmap BAR2 failed");
-        return -1;
-    }
-
-    printf("[\x1b[32m*\x1b[0m] BARs mapped successfully via Instance FD\n");
-
-    dev_state.event_ring = mmap(NULL, sizeof(struct pciem_shared_ring), PROT_READ | PROT_WRITE,
-                                 MAP_SHARED, dev_state.pciem_fd, 0);
-    if (dev_state.event_ring == MAP_FAILED) {
-        perror("mmap shared event ring failed");
-        goto cleanup;
-    }
 
     listen_sock = create_qemu_socket();
     if (listen_sock < 0)
