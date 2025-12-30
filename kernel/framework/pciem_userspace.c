@@ -253,7 +253,7 @@ static int pciem_shared_ring_alloc(struct pciem_userspace_state *us)
 {
     int order = get_order(sizeof(struct pciem_shared_ring));
 
-    us->shared_ring_page = alloc_pages(GFP_KERNEL | __GFP_ZERO | __GFP_COMP, order);
+    us->shared_ring_page = alloc_pages(GFP_KERNEL_ACCOUNT | __GFP_ZERO | __GFP_COMP, order);
     if (!us->shared_ring_page)
         return -ENOMEM;
 
