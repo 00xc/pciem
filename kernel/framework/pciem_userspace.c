@@ -241,23 +241,22 @@ void pciem_userspace_destroy(struct pciem_userspace_state *us)
 
     kfree(us->event_ring);
 
-    if (us->shared_ring_page)
-    {
-        __free_pages(us->shared_ring_page, get_order(sizeof(struct pciem_shared_ring)));
-    }
+    if (us->shared_ring)
+        __free_pages(virt_to_page(us->shared_ring), get_order(sizeof(struct pciem_shared_ring)));
 
     kfree(us);
 }
 
 static int pciem_shared_ring_alloc(struct pciem_userspace_state *us)
 {
+    struct page *page;
     int order = get_order(sizeof(struct pciem_shared_ring));
 
-    us->shared_ring_page = alloc_pages(GFP_KERNEL_ACCOUNT | __GFP_ZERO | __GFP_COMP, order);
-    if (!us->shared_ring_page)
+    page = alloc_pages(GFP_KERNEL_ACCOUNT | __GFP_ZERO | __GFP_COMP, order);
+    if (!page)
         return -ENOMEM;
 
-    us->shared_ring = page_address(us->shared_ring_page);
+    us->shared_ring = page_address(page);
     atomic_set(&us->shared_ring->head, 0);
     atomic_set(&us->shared_ring->tail, 0);
     spin_lock_init(&us->shared_ring_lock);
