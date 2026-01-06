@@ -204,11 +204,6 @@ struct pciem_userspace_state
 {
     struct pciem_root_complex *rc;
 
-    struct pciem_event *event_ring;
-    int event_head, event_tail;
-    wait_queue_head_t event_wait;
-    spinlock_t event_lock;
-
     struct hlist_head pending_requests[256];
     spinlock_t pending_lock;
     uint64_t next_seq;

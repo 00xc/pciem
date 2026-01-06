@@ -21,21 +21,15 @@
 #include "pciem_p2p.h"
 #include "pciem_userspace.h"
 
-#define MAX_EVENTS 4096
-
 static int pciem_device_release(struct inode *inode, struct file *file);
-static ssize_t pciem_device_read(struct file *file, char __user *buf, size_t count, loff_t *ppos);
 static ssize_t pciem_device_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos);
-static __poll_t pciem_device_poll(struct file *file, struct poll_table_struct *wait);
 static long pciem_device_ioctl(struct file *file, unsigned int cmd, unsigned long arg);
 static int pciem_device_mmap(struct file *file, struct vm_area_struct *vma);
 
 const struct file_operations pciem_device_fops = {
     .owner = THIS_MODULE,
     .release = pciem_device_release,
-    .read = pciem_device_read,
     .write = pciem_device_write,
-    .poll = pciem_device_poll,
     .unlocked_ioctl = pciem_device_ioctl,
     .compat_ioctl = pciem_device_ioctl,
     .mmap = pciem_device_mmap,
@@ -87,54 +81,6 @@ static const struct file_operations pciem_instance_fops = {
     .mmap = pciem_instance_mmap,
 };
 
-static inline bool event_ring_empty(struct pciem_userspace_state *us)
-{
-    return us->event_head == us->event_tail;
-}
-
-static inline bool event_ring_full(struct pciem_userspace_state *us)
-{
-    return ((us->event_tail + 1) % MAX_EVENTS) == us->event_head;
-}
-
-static bool event_ring_push(struct pciem_userspace_state *us, struct pciem_event *event)
-{
-    unsigned long flags;
-    bool ret = false;
-
-    spin_lock_irqsave(&us->event_lock, flags);
-
-    if (!event_ring_full(us))
-    {
-        us->event_ring[us->event_tail] = *event;
-        us->event_tail = (us->event_tail + 1) % MAX_EVENTS;
-        ret = true;
-    }
-
-    spin_unlock_irqrestore(&us->event_lock, flags);
-
-    return ret;
-}
-
-static bool event_ring_pop(struct pciem_userspace_state *us, struct pciem_event *event)
-{
-    unsigned long flags;
-    bool ret = false;
-
-    spin_lock_irqsave(&us->event_lock, flags);
-
-    if (!event_ring_empty(us))
-    {
-        *event = us->event_ring[us->event_head];
-        us->event_head = (us->event_head + 1) % MAX_EVENTS;
-        ret = true;
-    }
-
-    spin_unlock_irqrestore(&us->event_lock, flags);
-
-    return ret;
-}
-
 static void free_pending_request(struct pciem_userspace_state *us, struct pciem_pending_request *req)
 {
     unsigned long flags;
@@ -168,18 +114,6 @@ struct pciem_userspace_state *pciem_userspace_create(void)
     us = kzalloc(sizeof(*us), GFP_KERNEL);
     if (!us)
         return ERR_PTR(-ENOMEM);
-
-    us->event_ring = kmalloc_array(MAX_EVENTS, sizeof(struct pciem_event), GFP_KERNEL);
-    if (!us->event_ring)
-    {
-        kfree(us);
-        return ERR_PTR(-ENOMEM);
-    }
-
-    us->event_head = 0;
-    us->event_tail = 0;
-    init_waitqueue_head(&us->event_wait);
-    spin_lock_init(&us->event_lock);
 
     for (i = 0; i < ARRAY_SIZE(us->pending_requests); i++)
         INIT_HLIST_HEAD(&us->pending_requests[i]);
@@ -238,8 +172,6 @@ void pciem_userspace_destroy(struct pciem_userspace_state *us)
             kfree(req);
         }
     }
-
-    kfree(us->event_ring);
 
     if (us->shared_ring)
         __free_pages(virt_to_page(us->shared_ring), get_order(sizeof(struct pciem_shared_ring)));
@@ -300,15 +232,6 @@ void pciem_userspace_queue_event(struct pciem_userspace_state *us, struct pciem_
         pr_warn_ratelimited("Shared ring buffer full, dropping event for userspace (seq=%llu)\n",
                             event->seq);
 
-    if (!event_ring_push(us, event))
-    {
-        pr_warn_ratelimited("Event queue full, dropping event seq=%llu\n", event->seq);
-        return;
-    }
-
-    atomic_set(&us->event_pending, 1);
-    wake_up_interruptible(&us->event_wait);
-
     spin_lock_irqsave(&us->eventfd_lock, flags);
     if (us->eventfd)
     {
@@ -319,9 +242,6 @@ void pciem_userspace_queue_event(struct pciem_userspace_state *us, struct pciem_
 #endif
     }
     spin_unlock_irqrestore(&us->eventfd_lock, flags);
-
-    atomic_set(&us->event_pending, 1);
-    wake_up_interruptible(&us->event_wait);
 }
 
 int pciem_userspace_wait_response(struct pciem_userspace_state *us, uint64_t seq, uint64_t *data_out,
@@ -375,37 +295,6 @@ static int pciem_device_release(struct inode *inode, struct file *file)
     return 0;
 }
 
-static ssize_t pciem_device_read(struct file *file, char __user *buf, size_t count, loff_t *ppos)
-{
-    struct pciem_userspace_state *us = file->private_data;
-    struct pciem_event event;
-
-    if (count < sizeof(event))
-        return -EINVAL;
-
-    if (event_ring_pop(us, &event))
-    {
-        if (copy_to_user(buf, &event, sizeof(event)))
-            return -EFAULT;
-        return sizeof(event);
-    }
-
-    if (file->f_flags & O_NONBLOCK)
-        return -EAGAIN;
-
-    if (wait_event_interruptible(us->event_wait, !event_ring_empty(us)))
-        return -ERESTARTSYS;
-
-    if (event_ring_pop(us, &event))
-    {
-        if (copy_to_user(buf, &event, sizeof(event)))
-            return -EFAULT;
-        return sizeof(event);
-    }
-
-    return -EAGAIN;
-}
-
 static ssize_t pciem_device_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos)
 {
     struct pciem_userspace_state *us = file->private_data;
@@ -433,21 +322,6 @@ static ssize_t pciem_device_write(struct file *file, const char __user *buf, siz
         return -EINVAL;
 
     return sizeof(response);
-}
-
-static __poll_t pciem_device_poll(struct file *file, struct poll_table_struct *wait)
-{
-    struct pciem_userspace_state *us = file->private_data;
-    __poll_t mask = 0;
-
-    poll_wait(file, &us->event_wait, wait);
-
-    if (!event_ring_empty(us))
-        mask |= EPOLLIN | EPOLLRDNORM;
-
-    mask |= EPOLLOUT | EPOLLWRNORM;
-
-    return mask;
 }
 
 static int pciem_device_mmap(struct file *file, struct vm_area_struct *vma)
