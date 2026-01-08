@@ -6,6 +6,8 @@
 #include <linux/spinlock.h>
 #include <linux/types.h>
 #include <linux/wait.h>
+#include <linux/workqueue.h>
+#include <linux/poll.h>
 #else
 #include <stdatomic.h>
 #include <stdint.h>
@@ -216,6 +218,10 @@ struct pciem_watchpoint_info
 struct pciem_irq_eventfd_entry
 {
     struct eventfd_ctx *trigger;
+    wait_queue_head_t *wqh;
+    wait_queue_entry_t wait;
+    struct work_struct inject_work;
+    struct pciem_userspace_state *us;
     uint32_t vector;
     uint32_t flags;
     bool active;
@@ -244,8 +250,6 @@ struct pciem_userspace_state
 
     struct pciem_irq_eventfd_entry irq_eventfds[PCIEM_MAX_IRQ_EVENTFDS];
     spinlock_t irq_eventfd_lock;
-
-    struct task_struct *irq_poll_thread;
 
     bool bar_tracking_disabled;
 };
