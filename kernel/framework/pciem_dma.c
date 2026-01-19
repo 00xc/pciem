@@ -20,7 +20,7 @@ static int translate_iova(struct pciem_root_complex *v, u64 guest_iova, size_t l
 
     domain = iommu_get_domain_for_dev(&v->pciem_pdev->dev);
 
-    max_pages = (PAGE_ALIGN(guest_iova + len) - (guest_iova & PAGE_MASK)) >> PAGE_SHIFT;
+    max_pages = ((PAGE_ALIGN(guest_iova + len) - (guest_iova & PAGE_MASK)) >> PAGE_SHIFT) + 1;
 
     phys_pages = kmalloc_array(max_pages, sizeof(phys_addr_t), GFP_KERNEL);
     if (!phys_pages) {
