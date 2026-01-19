@@ -35,7 +35,7 @@ static int translate_iova(struct pciem_root_complex *v, u64 guest_iova, size_t l
 
         if (page_count >= max_pages)
         {
-            pr_err("translate_iova: page buffer overflow (calculated %d pages, but need more)\n", max_pages);
+            pr_err("translate_iova: page buffer overflow (max %d)\n", max_pages);
             kfree(phys_pages);
             return -EOVERFLOW;
         }
@@ -95,7 +95,7 @@ int pciem_dma_read_from_guest(struct pciem_root_complex *v, u64 guest_iova, void
 
         chunk_len = min_t(size_t, len - offset, PAGE_SIZE - page_offset);
 
-        kva = memremap(phys_pages[i] + page_offset, chunk_len, MEMREMAP_WB);
+        kva = memremap(phys_pages[i], chunk_len, MEMREMAP_WB);
         if (!kva)
         {
             pr_err("pciem: memremap failed for physical page %pa\n", &phys_pages[i]);
@@ -143,7 +143,7 @@ int pciem_dma_write_to_guest(struct pciem_root_complex *v, u64 guest_iova, const
 
         chunk_len = min_t(size_t, len - offset, PAGE_SIZE - page_offset);
 
-        kva = memremap(phys_pages[i] + page_offset, chunk_len, MEMREMAP_WB);
+        kva = memremap(phys_pages[i], chunk_len, MEMREMAP_WB);
         if (!kva)
         {
             pr_err("Failed to map physical page %pa\n", &phys_pages[i]);
