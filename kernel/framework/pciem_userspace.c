@@ -548,7 +548,7 @@ static long pciem_ioctl_inject_irq(struct pciem_userspace_state *us, struct pcie
 
     pr_debug("Injecting MSI vector %d\n", inject.vector);
 
-    pciem_trigger_msi(us->rc);
+    pciem_trigger_msi(us->rc, inject.vector);
 
     return 0;
 }
@@ -982,7 +982,7 @@ static void pciem_irqfd_work(struct work_struct *work)
     eventfd_ctx_do_read(entry->trigger, &count);
 
     if (count > 0 && us && us->rc) {
-        pciem_trigger_msi(us->rc);
+        pciem_trigger_msi(us->rc, entry->vector);
     }
 }
 

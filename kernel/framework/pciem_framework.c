@@ -130,16 +130,36 @@ int pciem_register_bar(struct pciem_root_complex *v, int bar_num, resource_size_
 }
 EXPORT_SYMBOL(pciem_register_bar);
 
-void pciem_trigger_msi(struct pciem_root_complex *v)
+void pciem_trigger_msi(struct pciem_root_complex *v, int vector)
 {
     struct pci_dev *dev = v->pciem_pdev;
-    if (!dev || !dev->msi_enabled || !dev->irq)
+    unsigned int irq;
+
+    if (!dev || (!dev->msi_enabled && !dev->msix_enabled))
     {
-        pr_warn("Cannot trigger MSI: device not ready or MSI not enabled/irq=0\n");
+        pr_warn("Cannot trigger MSI/MSI-X: device not ready or interrupts not enabled (msi=%d, msix=%d)\n",
+                dev ? dev->msi_enabled : 0, dev ? dev->msix_enabled : 0);
         return;
     }
-    pr_info("Triggering virtual MSI for IRQ %u via irq_work", dev->irq);
-    v->pending_msi_irq = dev->irq;
+
+    if (dev->msix_enabled) {
+        irq = pci_irq_vector(dev, vector);
+        if (irq == 0) {
+            pr_warn("Cannot get IRQ for MSI-X vector %d\n", vector);
+            return;
+        }
+        pr_info("Triggering MSI-X vector %d (IRQ %u) via irq_work\n", vector, irq);
+    }
+    else {
+        irq = dev->irq;
+        if (irq == 0) {
+            pr_warn("Cannot trigger MSI: dev->irq is 0\n");
+            return;
+        }
+        pr_info("Triggering MSI (IRQ %u) via irq_work\n", irq);
+    }
+
+    v->pending_msi_irq = irq;
     irq_work_queue(&v->msi_irq_work);
 }
 EXPORT_SYMBOL(pciem_trigger_msi);

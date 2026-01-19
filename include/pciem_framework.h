@@ -87,7 +87,7 @@ struct pciem_root_complex
     struct pciem_p2p_manager *p2p_mgr;
 };
 
-void pciem_trigger_msi(struct pciem_root_complex *v);
+void pciem_trigger_msi(struct pciem_root_complex *v, int vector);
 int pciem_register_bar(struct pciem_root_complex *v, int bar_num, resource_size_t size, u32 flags);
 struct pciem_root_complex *pciem_alloc_root_complex(void);
 void pciem_free_root_complex(struct pciem_root_complex *v);
