@@ -488,7 +488,7 @@ static bool handle_pm_read(struct pciem_cap_entry *cap, u32 offset, u32 size, u3
 {
     struct pciem_pm_state *st = &cap->state.pm_state;
 
-    if (offset == 4 && size == 2)
+    if (offset == PCI_PM_CTRL && size == 2)
     {
         *value = st->control;
         return true;
@@ -620,9 +620,9 @@ static bool handle_pm_write(struct pciem_cap_entry *cap, u32 offset, u32 size, u
 {
     struct pciem_pm_state *st = &cap->state.pm_state;
 
-    if (offset == 4 && size == 2)
+    if (offset == PCI_PM_CTRL && size == 2)
     {
-        st->control = value & 0x8103;
+        st->control = value & (PCI_PM_CTRL_STATE_MASK | PCI_PM_CTRL_PME_ENABLE | PCI_PM_CTRL_PME_STATUS);
         pr_info("PM Control written: 0x%04x (Power State: D%d)\n", value, value & 0x3);
         return true;
     }
