@@ -476,7 +476,7 @@ static bool handle_msix_read(struct pciem_cap_entry *cap, u32 offset, u32 size, 
 {
     struct pciem_msix_state *st = &cap->state.msix_state;
 
-    if (offset == 2 && size == 2)
+    if (offset == PCI_MSIX_FLAGS && size == 2)
     {
         *value = st->control;
         return true;
@@ -606,7 +606,7 @@ static bool handle_msix_write(struct pciem_cap_entry *cap, u32 offset, u32 size,
 {
     struct pciem_msix_state *st = &cap->state.msix_state;
 
-    if (offset == 2 && size == 2)
+    if (offset == PCI_MSIX_FLAGS && size == 2)
     {
         st->control = value & 0xC7FF;
         pr_info("MSI-X Control written: 0x%04x (Enable: %d)\n", value, !!(value & PCI_MSIX_FLAGS_ENABLE));
