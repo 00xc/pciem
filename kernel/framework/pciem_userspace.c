@@ -1034,7 +1034,6 @@ static long pciem_ioctl_set_irq_eventfd(struct pciem_userspace_state *us,
     struct pciem_irq_eventfd_entry *entry = NULL;
     struct fd f;
     struct pciem_poll_helper pt_helper;
-    unsigned long flags;
     int i;
 
     if (!us->rc || !us->registered)
@@ -1043,7 +1042,7 @@ static long pciem_ioctl_set_irq_eventfd(struct pciem_userspace_state *us,
     if (copy_from_user(&cfg, arg, sizeof(cfg)))
         return -EFAULT;
 
-    spin_lock_irqsave(&us->irq_eventfd_lock, flags);
+    guard(spinlock_irqsave)(&us->irq_eventfd_lock);
 
     for (i = 0; i < PCIEM_MAX_IRQ_EVENTFDS; i++)
     {
@@ -1054,7 +1053,6 @@ static long pciem_ioctl_set_irq_eventfd(struct pciem_userspace_state *us,
             entry = &us->irq_eventfds[i];
         }
     }
-    spin_unlock_irqrestore(&us->irq_eventfd_lock, flags);
 
     if (cfg.eventfd < 0)
     {
