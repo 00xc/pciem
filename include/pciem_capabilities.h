@@ -91,7 +91,7 @@ struct pciem_cap_entry
             u16 control;
         } msix_state;
 
-        struct
+        struct pciem_pm_state
         {
             u16 control;
             u16 status;

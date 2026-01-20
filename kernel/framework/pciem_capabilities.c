@@ -601,6 +601,20 @@ static bool handle_msix_write(struct pciem_cap_entry *cap, u32 offset, u32 size,
     return false;
 }
 
+static bool handle_pm_write(struct pciem_cap_entry *cap, u32 offset, u32 size, u32 value)
+{
+    struct pciem_pm_state *st = &cap->state.pm_state;
+
+    if (offset == 4 && size == 2)
+    {
+        st->control = value & 0x8103;
+        pr_info("PM Control written: 0x%04x (Power State: D%d)\n", value, value & 0x3);
+        return true;
+    }
+
+    return false;
+}
+
 bool pciem_handle_cap_write(struct pciem_root_complex *v, int where, int size, u32 value)
 {
     struct pciem_cap_manager *mgr = v->cap_mgr;
@@ -628,14 +642,7 @@ bool pciem_handle_cap_write(struct pciem_root_complex *v, int where, int size, u
             case PCIEM_CAP_MSIX:
                 return handle_msix_write(cap, cap_offset, size, value);
             case PCIEM_CAP_PM:
-                if (cap_offset == 4 && size == 2)
-                {
-                    cap->state.pm_state.control = value & 0x8103;
-                    pr_info("PM Control written: 0x%04x (Power State: D%d)\n", value, value & 0x3);
-                    return true;
-                }
-                break;
-
+                return handle_pm_write(cap, cap_offset, size, value);
             case PCIEM_CAP_PASID:
                 if (cap_offset == 4 && size == 2)
                 {
