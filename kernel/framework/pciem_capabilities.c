@@ -432,6 +432,50 @@ void pciem_build_config_space(struct pciem_root_complex *v)
     }
 }
 
+static bool handle_msi_read(struct pciem_cap_entry *cap, u32 offset, u32 size, u32 *value)
+{
+    struct pciem_msi_state *st = &cap->state.msi_state;
+
+    if (offset == 2 && size == 2)
+    {
+        *value = st->control;
+        return true;
+    }
+    if (cap->config.msi.has_64bit)
+    {
+        if (offset == 4)
+        {
+            *value = st->address_lo;
+            return true;
+        }
+        else if (offset == 8)
+        {
+            *value = st->address_hi;
+            return true;
+        }
+        else if (offset == 12)
+        {
+            *value = st->data;
+            return true;
+        }
+    }
+    else
+    {
+        if (offset == 4)
+        {
+            *value = st->address_lo;
+            return true;
+        }
+        else if (offset == 8)
+        {
+            *value = st->data;
+            return true;
+        }
+    }
+
+    return false;
+}
+
 bool pciem_handle_cap_read(struct pciem_root_complex *v, int where, int size, u32 *value)
 {
     struct pciem_cap_manager *mgr = v->cap_mgr;
@@ -453,44 +497,7 @@ bool pciem_handle_cap_read(struct pciem_root_complex *v, int where, int size, u3
             switch (cap->type)
             {
             case PCIEM_CAP_MSI:
-                if (cap_offset == 2 && size == 2)
-                {
-                    *value = cap->state.msi_state.control;
-                    return true;
-                }
-                if (cap->config.msi.has_64bit)
-                {
-                    if (cap_offset == 4)
-                    {
-                        *value = cap->state.msi_state.address_lo;
-                        return true;
-                    }
-                    else if (cap_offset == 8)
-                    {
-                        *value = cap->state.msi_state.address_hi;
-                        return true;
-                    }
-                    else if (cap_offset == 12)
-                    {
-                        *value = cap->state.msi_state.data;
-                        return true;
-                    }
-                }
-                else
-                {
-                    if (cap_offset == 4)
-                    {
-                        *value = cap->state.msi_state.address_lo;
-                        return true;
-                    }
-                    else if (cap_offset == 8)
-                    {
-                        *value = cap->state.msi_state.data;
-                        return true;
-                    }
-                }
-                break;
-
+                return handle_msi_read(cap, cap_offset, size, value);
             case PCIEM_CAP_MSIX:
                 if (cap_offset == 2 && size == 2)
                 {
