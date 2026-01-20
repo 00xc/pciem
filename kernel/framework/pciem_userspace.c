@@ -125,7 +125,6 @@ struct pciem_userspace_state *pciem_userspace_create(void)
     us->next_seq = 1;
 
     us->registered = false;
-    us->config_locked = false;
     atomic_set(&us->event_pending, 0);
 
     spin_lock_init(&us->watchpoint_lock);
@@ -389,7 +388,7 @@ static long pciem_ioctl_add_bar(struct pciem_userspace_state *us, struct pciem_b
     if (!us->rc)
         return -EINVAL;
 
-    if (us->config_locked)
+    if (us->registered)
         return -EBUSY;
 
     if (copy_from_user(&cfg, arg, sizeof(cfg)))
@@ -422,7 +421,7 @@ static long pciem_ioctl_add_capability(struct pciem_userspace_state *us, struct 
     if (!us->rc)
         return -EINVAL;
 
-    if (us->config_locked)
+    if (us->registered)
         return -EBUSY;
 
     if (copy_from_user(&cfg, arg, sizeof(cfg)))
@@ -473,7 +472,7 @@ static long pciem_ioctl_set_config(struct pciem_userspace_state *us, struct pcie
     if (!us->rc)
         return -EINVAL;
 
-    if (us->config_locked)
+    if (us->registered)
         return -EBUSY;
 
     if (copy_from_user(&cfg, arg, sizeof(cfg)))
@@ -522,7 +521,6 @@ static long pciem_ioctl_register(struct pciem_userspace_state *us)
         return ret;
     }
 
-    us->config_locked = true;
     us->registered = true;
 
     fd = anon_inode_getfd("pciem_instance", &pciem_instance_fops, us, O_RDWR | O_CLOEXEC);

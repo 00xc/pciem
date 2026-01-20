@@ -249,7 +249,6 @@ struct pciem_userspace_state
     uint64_t next_seq;
 
     bool registered;
-    bool config_locked;
     atomic_t event_pending;
 
     struct pciem_shared_ring *shared_ring;
