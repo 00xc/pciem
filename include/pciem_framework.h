@@ -75,6 +75,7 @@ struct pciem_root_complex
     u8 cfg[256];
 
     struct pciem_bar_info bars[PCI_STD_NUM_BARS];
+    rwlock_t bars_lock;
 
     struct platform_device *shared_bridge_pdev;
 

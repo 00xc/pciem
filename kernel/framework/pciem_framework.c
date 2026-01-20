@@ -105,6 +105,8 @@ int pciem_register_bar(struct pciem_root_complex *v, uint32_t bar_num, resource_
     if (bar_num >= PCI_STD_NUM_BARS)
         return -EINVAL;
 
+    guard(write_lock)(&v->bars_lock);
+
     if (size == 0)
     {
         v->bars[bar_num].size = 0;
@@ -863,6 +865,8 @@ struct pciem_root_complex *pciem_alloc_root_complex(void)
     v = kzalloc(sizeof(*v), GFP_KERNEL);
     if (!v)
         return ERR_PTR(-ENOMEM);
+
+    rwlock_init(&v->bars_lock);
 
     /* Essential initialization that must happen */
     init_irq_work(&v->msi_irq_work, pciem_msi_irq_work_func);

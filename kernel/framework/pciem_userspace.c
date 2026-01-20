@@ -56,6 +56,7 @@ static int pciem_instance_mmap(struct file *file, struct vm_area_struct *vma)
         return -EINVAL;
     }
 
+    guard(read_lock)(&us->rc->bars_lock);
     bar = &us->rc->bars[bar_index];
 
     if (bar->size == 0 || bar->phys_addr == 0)
@@ -696,6 +697,7 @@ static long pciem_ioctl_get_bar_info(struct pciem_userspace_state *us, struct pc
     if (query.bar_index >= PCI_STD_NUM_BARS)
         return -EINVAL;
 
+    guard(read_lock)(&us->rc->bars_lock);
     bar = &us->rc->bars[query.bar_index];
 
     if (bar->size == 0)
