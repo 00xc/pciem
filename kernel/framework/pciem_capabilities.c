@@ -615,6 +615,23 @@ static bool handle_pm_write(struct pciem_cap_entry *cap, u32 offset, u32 size, u
     return false;
 }
 
+static bool handle_pasid_write(struct pciem_cap_entry *cap, u32 offset, u32 size, u32 value)
+{
+    struct pciem_pasid_state *st = &cap->state.pasid_state;
+
+    if (offset == 4 && size == 2)
+    {
+        st->control = value & 0x07;
+        if (value & 0x01)
+        {
+            pr_info("PASID Enabled\n");
+        }
+        return true;
+    }
+
+    return false;
+}
+
 bool pciem_handle_cap_write(struct pciem_root_complex *v, int where, int size, u32 value)
 {
     struct pciem_cap_manager *mgr = v->cap_mgr;
@@ -644,17 +661,7 @@ bool pciem_handle_cap_write(struct pciem_root_complex *v, int where, int size, u
             case PCIEM_CAP_PM:
                 return handle_pm_write(cap, cap_offset, size, value);
             case PCIEM_CAP_PASID:
-                if (cap_offset == 4 && size == 2)
-                {
-                    cap->state.pasid_state.control = value & 0x07;
-                    if (value & 0x01)
-                    {
-                        pr_info("PASID Enabled\n");
-                    }
-                    return true;
-                }
-                break;
-
+                return handle_pasid_write(cap, cap_offset, size, value);
             default:
                 break;
             }

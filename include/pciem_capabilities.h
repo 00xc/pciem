@@ -97,7 +97,7 @@ struct pciem_cap_entry
             u16 status;
         } pm_state;
 
-        struct
+        struct pciem_pasid_state
         {
             u16 control;
             u32 pasid;
