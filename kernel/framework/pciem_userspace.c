@@ -45,14 +45,14 @@ static int pciem_instance_mmap(struct file *file, struct vm_area_struct *vma)
     struct pciem_bar_info *bar;
     unsigned long size = vma->vm_end - vma->vm_start;
 
-    int bar_index = vma->vm_pgoff;
+    unsigned long bar_index = vma->vm_pgoff;
 
     if (!us || !us->rc)
         return -ENODEV;
 
-    if (bar_index < 0 || bar_index >= PCI_STD_NUM_BARS)
+    if (bar_index >= PCI_STD_NUM_BARS)
     {
-        pr_err("pciem_instance: Invalid BAR index %d via mmap offset\n", bar_index);
+        pr_err("pciem_instance: Invalid BAR index %lu via mmap offset\n", bar_index);
         return -EINVAL;
     }
 
@@ -60,7 +60,7 @@ static int pciem_instance_mmap(struct file *file, struct vm_area_struct *vma)
 
     if (bar->size == 0 || bar->phys_addr == 0)
     {
-        pr_err("pciem_instance: BAR%d is not active or has no physical address\n", bar_index);
+        pr_err("pciem_instance: BAR%lu is not active or has no physical address\n", bar_index);
         return -EINVAL;
     }
 
@@ -73,7 +73,7 @@ static int pciem_instance_mmap(struct file *file, struct vm_area_struct *vma)
         return -EAGAIN;
     }
 
-    pr_debug("pciem_instance: Mapped BAR%d (phys: 0x%llx) to userspace via instance FD\n",
+    pr_debug("pciem_instance: Mapped BAR%lu (phys: 0x%llx) to userspace via instance FD\n",
             bar_index, (u64)bar->phys_addr);
 
     return 0;

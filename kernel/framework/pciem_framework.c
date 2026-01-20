@@ -64,7 +64,7 @@ static void pciem_fixup_bridge_domain(struct pci_host_bridge *bridge,
 static int parse_phys_regions(struct pciem_root_complex *v)
 {
     char *str, *token, *cur;
-    int bar_num;
+    uint32_t bar_num;
     resource_size_t start, size;
 
     if (!pciem_phys_regions || strlen(pciem_phys_regions) == 0)
@@ -81,10 +81,10 @@ static int parse_phys_regions(struct pciem_root_complex *v)
     cur = str;
     while ((token = strsep(&cur, ",")) != NULL)
     {
-        if (sscanf(token, "bar%d:0x%llx:0x%llx", &bar_num, &start, &size) == 3 ||
-            sscanf(token, "bar%d:%llx:%llx", &bar_num, &start, &size) == 3)
+        if (sscanf(token, "bar%u:0x%llx:0x%llx", &bar_num, &start, &size) == 3 ||
+            sscanf(token, "bar%u:%llx:%llx", &bar_num, &start, &size) == 3)
         {
-            if (bar_num < 0 || bar_num >= PCI_STD_NUM_BARS)
+            if (bar_num >= PCI_STD_NUM_BARS)
             {
                 pr_warn("Invalid BAR number %d in phys_regions\n", bar_num);
                 continue;
@@ -100,12 +100,10 @@ static int parse_phys_regions(struct pciem_root_complex *v)
     return 0;
 }
 
-int pciem_register_bar(struct pciem_root_complex *v, int bar_num, resource_size_t size, u32 flags)
+int pciem_register_bar(struct pciem_root_complex *v, uint32_t bar_num, resource_size_t size, u32 flags)
 {
-    if (bar_num < 0 || bar_num >= PCI_STD_NUM_BARS)
-    {
+    if (bar_num >= PCI_STD_NUM_BARS)
         return -EINVAL;
-    }
 
     if (size == 0)
     {
