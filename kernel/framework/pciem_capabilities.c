@@ -476,6 +476,18 @@ static bool handle_msi_read(struct pciem_cap_entry *cap, u32 offset, u32 size, u
     return false;
 }
 
+static bool handle_msix_read(struct pciem_cap_entry *cap, u32 offset, u32 size, u32 *value)
+{
+    struct pciem_msix_state *st = &cap->state.msix_state;
+
+    if (offset == 2 && size == 2)
+    {
+        *value = st->control;
+        return true;
+    }
+    return false;
+}
+
 bool pciem_handle_cap_read(struct pciem_root_complex *v, int where, int size, u32 *value)
 {
     struct pciem_cap_manager *mgr = v->cap_mgr;
@@ -499,13 +511,7 @@ bool pciem_handle_cap_read(struct pciem_root_complex *v, int where, int size, u3
             case PCIEM_CAP_MSI:
                 return handle_msi_read(cap, cap_offset, size, value);
             case PCIEM_CAP_MSIX:
-                if (cap_offset == 2 && size == 2)
-                {
-                    *value = cap->state.msix_state.control;
-                    return true;
-                }
-                break;
-
+                return handle_msix_read(cap, cap_offset, size, value);
             case PCIEM_CAP_PM:
                 if (cap_offset == 4 && size == 2)
                 {
