@@ -587,6 +587,20 @@ static bool handle_msi_write(struct pciem_cap_entry *cap, u32 offset, u32 size, 
     return false;
 }
 
+static bool handle_msix_write(struct pciem_cap_entry *cap, u32 offset, u32 size, u32 value)
+{
+    struct pciem_msix_state *st = &cap->state.msix_state;
+
+    if (offset == 2 && size == 2)
+    {
+        st->control = value & 0xC7FF;
+        pr_info("MSI-X Control written: 0x%04x (Enable: %d)\n", value, !!(value & PCI_MSIX_FLAGS_ENABLE));
+        return true;
+    }
+
+    return false;
+}
+
 bool pciem_handle_cap_write(struct pciem_root_complex *v, int where, int size, u32 value)
 {
     struct pciem_cap_manager *mgr = v->cap_mgr;
@@ -612,14 +626,7 @@ bool pciem_handle_cap_write(struct pciem_root_complex *v, int where, int size, u
             case PCIEM_CAP_MSI:
                 return handle_msi_write(cap, cap_offset, size, value);
             case PCIEM_CAP_MSIX:
-                if (cap_offset == 2 && size == 2)
-                {
-                    cap->state.msix_state.control = value & 0xC7FF;
-                    pr_info("MSI-X Control written: 0x%04x (Enable: %d)\n", value, !!(value & PCI_MSIX_FLAGS_ENABLE));
-                    return true;
-                }
-                break;
-
+                return handle_msix_write(cap, cap_offset, size, value);
             case PCIEM_CAP_PM:
                 if (cap_offset == 4 && size == 2)
                 {

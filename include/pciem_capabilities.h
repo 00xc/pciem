@@ -86,7 +86,7 @@ struct pciem_cap_entry
             u32 mask_bits;
         } msi_state;
 
-        struct
+        struct pciem_msix_state
         {
             u16 control;
         } msix_state;
