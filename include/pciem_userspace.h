@@ -240,6 +240,10 @@ struct pciem_irq_eventfd_entry
     bool active;
 };
 
+#define PCIEM_UNREGISTERED 0
+#define PCIEM_REGISTERING  1
+#define PCIEM_REGISTERED   2
+
 struct pciem_userspace_state
 {
     struct pciem_root_complex *rc;
@@ -248,7 +252,7 @@ struct pciem_userspace_state
     spinlock_t pending_lock;
     uint64_t next_seq;
 
-    bool registered;
+    atomic_t registered;
     atomic_t event_pending;
 
     struct pciem_shared_ring *shared_ring;

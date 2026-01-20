@@ -124,7 +124,7 @@ struct pciem_userspace_state *pciem_userspace_create(void)
     spin_lock_init(&us->pending_lock);
     us->next_seq = 1;
 
-    us->registered = false;
+    atomic_set(&us->registered, PCIEM_UNREGISTERED);
     atomic_set(&us->event_pending, 0);
 
     spin_lock_init(&us->watchpoint_lock);
@@ -290,21 +290,62 @@ int pciem_userspace_wait_response(struct pciem_userspace_state *us, uint64_t seq
 
 static int pciem_check_unregistered(struct pciem_userspace_state *us)
 {
+    int registered;
+
     if (!us->rc)
         return -EINVAL;
 
-    if (us->registered)
+    registered = atomic_read_acquire(&us->registered);
+    if (registered == PCIEM_REGISTERING)
         return -EBUSY;
+    if (registered == PCIEM_REGISTERED)
+        return -EINVAL;
 
     return 0;
 }
 
 static int pciem_check_registered(struct pciem_userspace_state *us)
 {
-    if (!us->rc || !us->registered)
+    int registered;
+
+    if (!us->rc)
+        return -EINVAL;
+
+    registered = atomic_read_acquire(&us->registered);
+    if (registered == PCIEM_REGISTERING)
+        return -EBUSY;
+    if (registered == PCIEM_UNREGISTERED)
         return -EINVAL;
 
     return 0;
+}
+
+static int pciem_start_registration(struct pciem_userspace_state *us)
+{
+    int val = PCIEM_UNREGISTERED;
+
+    if (!us->rc)
+        return -EINVAL;
+
+    if (atomic_try_cmpxchg_release(&us->registered, &val, PCIEM_REGISTERING))
+        return 0;
+
+    if (val == PCIEM_REGISTERING)
+        return -EBUSY;
+
+    /* If the cmpxchg() failed the state can only be REGISTERING
+     * (checked above) or REGISTERED (this case), so return EINVAL */
+    return -EINVAL;
+}
+
+static void pciem_cancel_registration(struct pciem_userspace_state *us)
+{
+    atomic_set_release(&us->registered, PCIEM_UNREGISTERED);
+}
+
+static void pciem_complete_registration(struct pciem_userspace_state *us)
+{
+    atomic_set_release(&us->registered, PCIEM_REGISTERED);
 }
 
 static int pciem_device_release(struct inode *inode, struct file *file)
@@ -518,7 +559,7 @@ static long pciem_ioctl_register(struct pciem_userspace_state *us)
     int ret;
     int fd;
 
-    ret = pciem_check_unregistered(us);
+    ret = pciem_start_registration(us);
     if (ret)
         return ret;
 
@@ -529,11 +570,12 @@ static long pciem_ioctl_register(struct pciem_userspace_state *us)
     ret = pciem_complete_init(us->rc);
     if (ret)
     {
+        pciem_cancel_registration(us);
         pr_err("Failed to complete device initialization: %d\n", ret);
         return ret;
     }
 
-    us->registered = true;
+    pciem_complete_registration(us);
 
     fd = anon_inode_getfd("pciem_instance", &pciem_instance_fops, us, O_RDWR | O_CLOEXEC);
     if (fd < 0) {
