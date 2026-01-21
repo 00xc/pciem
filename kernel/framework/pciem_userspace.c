@@ -1167,8 +1167,8 @@ static long pciem_ioctl_set_irqfd(struct pciem_userspace_state *us,
 
     f = fdget(cfg.eventfd);
     if (fd_empty(f)) {
-        eventfd_ctx_put(eventfd);
-        return -EBADF;
+        ret = -EBADF;
+        goto fail;
     }
 
     irqfd->trigger = eventfd;
@@ -1189,6 +1189,11 @@ static long pciem_ioctl_set_irqfd(struct pciem_userspace_state *us,
     pr_info("Registered IRQ eventfd %d for vector %u (Direct Wakeup)\n", cfg.eventfd, cfg.vector);
 
     return 0;
+
+fail:
+    if (eventfd && !IS_ERR(eventfd))
+        eventfd_ctx_put(eventfd);
+    return ret;
 }
 
 static long pciem_ioctl_dma_indirect(struct pciem_userspace_state *us, struct pciem_dma_indirect __user *arg)
