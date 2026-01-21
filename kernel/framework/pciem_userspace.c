@@ -24,7 +24,7 @@
 #include "pciem_userspace.h"
 
 static int pciem_device_release(struct inode *inode, struct file *file);
-static void pciem_irqfd_shutdown(struct pciem_irq_eventfd_entry *entry);
+static void pciem_irqfd_shutdown(struct pciem_irqfd *irqfd);
 static ssize_t pciem_device_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos);
 static long pciem_device_ioctl(struct file *file, unsigned int cmd, unsigned long arg);
 static int pciem_device_mmap(struct file *file, struct vm_area_struct *vma);
@@ -113,7 +113,7 @@ static struct pciem_pending_request *find_pending_request(struct pciem_userspace
 static void pciem_irqfds_init(struct pciem_irqfds *irqfds)
 {
     spin_lock_init(&irqfds->lock);
-    for (int i = 0; i < PCIEM_MAX_IRQ_EVENTFDS; i++)
+    for (int i = 0; i < PCIEM_MAX_IRQFDS; i++)
     {
         irqfds->entries[i].active = false;
         irqfds->entries[i].trigger = NULL;
@@ -124,7 +124,7 @@ static void pciem_irqfds_init(struct pciem_irqfds *irqfds)
 
 static void pciem_irqfds_shutdown(struct pciem_irqfds *irqfds)
 {
-    for (int i = 0; i < PCIEM_MAX_IRQ_EVENTFDS; i++)
+    for (int i = 0; i < PCIEM_MAX_IRQFDS; i++)
     {
         if (irqfds->entries[i].active)
         {
@@ -1051,24 +1051,24 @@ static long pciem_ioctl_set_eventfd(struct pciem_userspace_state *us, struct pci
 
 static void pciem_irqfd_work(struct work_struct *work)
 {
-    struct pciem_irq_eventfd_entry *entry = container_of(work, struct pciem_irq_eventfd_entry, inject_work);
-    struct pciem_userspace_state *us = entry->us;
+    struct pciem_irqfd *irqfd = container_of(work, struct pciem_irqfd, inject_work);
+    struct pciem_userspace_state *us = irqfd->us;
     u64 count;
 
-    eventfd_ctx_do_read(entry->trigger, &count);
+    eventfd_ctx_do_read(irqfd->trigger, &count);
 
     if (count > 0 && us && us->rc) {
-        pciem_trigger_msi(us->rc, entry->vector);
+        pciem_trigger_msi(us->rc, irqfd->vector);
     }
 }
 
 static int pciem_irqfd_wakeup(wait_queue_entry_t *wait, unsigned mode, int sync, void *key)
 {
-    struct pciem_irq_eventfd_entry *entry = container_of(wait, struct pciem_irq_eventfd_entry, wait);
+    struct pciem_irqfd *irqfd = container_of(wait, struct pciem_irqfd, wait);
     __poll_t flags = key_to_poll(key);
 
     if (flags & EPOLLIN) {
-        schedule_work(&entry->inject_work);
+        schedule_work(&irqfd->inject_work);
     }
 
     return 0;
@@ -1076,30 +1076,30 @@ static int pciem_irqfd_wakeup(wait_queue_entry_t *wait, unsigned mode, int sync,
 
 struct pciem_poll_helper {
     struct poll_table_struct pt;
-    struct pciem_irq_eventfd_entry *entry;
+    struct pciem_irqfd *irqfd;
 };
 
 static void pciem_irqfd_ptable_queue_proc(struct file *file, wait_queue_head_t *wqh, poll_table *pt)
 {
     struct pciem_poll_helper *helper = container_of(pt, struct pciem_poll_helper, pt);
-    struct pciem_irq_eventfd_entry *entry = helper->entry;
+    struct pciem_irqfd *irqfd = helper->irqfd;
 
-    entry->wqh = wqh;
-    add_wait_queue(wqh, &entry->wait);
+    irqfd->wqh = wqh;
+    add_wait_queue(wqh, &irqfd->wait);
 }
 
-static void pciem_irqfd_shutdown(struct pciem_irq_eventfd_entry *entry)
+static void pciem_irqfd_shutdown(struct pciem_irqfd *irqfd)
 {
-    if (!entry->active)
+    if (!irqfd->active)
         return;
 
-    remove_wait_queue(entry->wqh, &entry->wait);
-    entry->active = false;
+    remove_wait_queue(irqfd->wqh, &irqfd->wait);
+    irqfd->active = false;
 
-    flush_work(&entry->inject_work);
+    flush_work(&irqfd->inject_work);
 
-    eventfd_ctx_put(entry->trigger);
-    entry->trigger = NULL;
+    eventfd_ctx_put(irqfd->trigger);
+    irqfd->trigger = NULL;
 }
 
 
@@ -1115,12 +1115,12 @@ static bool fd_empty(struct fd fd)
 }
 #endif
 
-static long pciem_ioctl_set_irq_eventfd(struct pciem_userspace_state *us,
-                                        struct pciem_irq_eventfd_config __user *arg)
+static long pciem_ioctl_set_irqfd(struct pciem_userspace_state *us,
+                                        struct pciem_irqfd_config __user *arg)
 {
-    struct pciem_irq_eventfd_config cfg;
+    struct pciem_irqfd_config cfg;
     struct eventfd_ctx *eventfd = NULL;
-    struct pciem_irq_eventfd_entry *entry = NULL;
+    struct pciem_irqfd *irqfd = NULL;
     struct fd f;
     struct pciem_poll_helper pt_helper;
     int i, ret;
@@ -1135,31 +1135,31 @@ static long pciem_ioctl_set_irq_eventfd(struct pciem_userspace_state *us,
 
     guard(spinlock_irqsave)(&irqfds->lock);
 
-    for (i = 0; i < PCIEM_MAX_IRQ_EVENTFDS; i++)
+    for (i = 0; i < PCIEM_MAX_IRQFDS; i++)
     {
         if (irqfds->entries[i].active && irqfds->entries[i].vector == cfg.vector) {
-            entry = &irqfds->entries[i];
+            irqfd = &irqfds->entries[i];
             break;
-        } else if (!entry && !irqfds->entries[i].active) {
-            entry = &irqfds->entries[i];
+        } else if (!irqfd && !irqfds->entries[i].active) {
+            irqfd = &irqfds->entries[i];
         }
     }
 
     if (cfg.eventfd < 0)
     {
-        if (!entry || !entry->active || entry->vector != cfg.vector)
+        if (!irqfd || !irqfd->active || irqfd->vector != cfg.vector)
             return -ENOENT;
 
-        pciem_irqfd_shutdown(entry);
+        pciem_irqfd_shutdown(irqfd);
         pr_info("Unregistered IRQ eventfd for vector %u\n", cfg.vector);
         return 0;
     }
 
-    if (!entry)
+    if (!irqfd)
         return -ENOSPC;
 
-    if (entry->active)
-        pciem_irqfd_shutdown(entry);
+    if (irqfd->active)
+        pciem_irqfd_shutdown(irqfd);
 
     eventfd = eventfd_ctx_fdget(cfg.eventfd);
     if (IS_ERR(eventfd))
@@ -1171,21 +1171,21 @@ static long pciem_ioctl_set_irq_eventfd(struct pciem_userspace_state *us,
         return -EBADF;
     }
 
-    entry->trigger = eventfd;
-    entry->vector = cfg.vector;
-    entry->flags = cfg.flags;
-    entry->us = us;
-    INIT_WORK(&entry->inject_work, pciem_irqfd_work);
-    init_waitqueue_func_entry(&entry->wait, pciem_irqfd_wakeup);
+    irqfd->trigger = eventfd;
+    irqfd->vector = cfg.vector;
+    irqfd->flags = cfg.flags;
+    irqfd->us = us;
+    INIT_WORK(&irqfd->inject_work, pciem_irqfd_work);
+    init_waitqueue_func_entry(&irqfd->wait, pciem_irqfd_wakeup);
 
     init_poll_funcptr(&pt_helper.pt, pciem_irqfd_ptable_queue_proc);
-    pt_helper.entry = entry;
+    pt_helper.irqfd = irqfd;
 
     vfs_poll(fd_file(f), &pt_helper.pt);
 
     fdput(f);
 
-    entry->active = true;
+    irqfd->active = true;
     pr_info("Registered IRQ eventfd %d for vector %u (Direct Wakeup)\n", cfg.eventfd, cfg.vector);
 
     return 0;
@@ -1370,8 +1370,8 @@ static long pciem_device_ioctl(struct file *file, unsigned int cmd, unsigned lon
     case PCIEM_IOCTL_SET_EVENTFD:
         return pciem_ioctl_set_eventfd(us, (struct pciem_eventfd_config __user *)arg);
 
-    case PCIEM_IOCTL_SET_IRQ_EVENTFD:
-        return pciem_ioctl_set_irq_eventfd(us, (struct pciem_irq_eventfd_config __user *)arg);
+    case PCIEM_IOCTL_SET_IRQFD:
+        return pciem_ioctl_set_irqfd(us, (struct pciem_irqfd_config __user *)arg);
 
     case PCIEM_IOCTL_DMA_INDIRECT:
         return pciem_ioctl_dma_indirect(us, (struct pciem_dma_indirect __user *)arg);

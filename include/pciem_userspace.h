@@ -163,7 +163,7 @@ struct pciem_eventfd_config
     uint32_t reserved;
 };
 
-struct pciem_irq_eventfd_config
+struct pciem_irqfd_config
 {
     int32_t eventfd;
     uint32_t vector;
@@ -171,8 +171,8 @@ struct pciem_irq_eventfd_config
     uint32_t reserved;
 };
 
-#define PCIEM_IRQ_EVENTFD_FLAG_LEVEL    (1 << 0)
-#define PCIEM_IRQ_EVENTFD_FLAG_DEASSERT (1 << 1)
+#define PCIEM_IRQFD_FLAG_LEVEL    (1 << 0)
+#define PCIEM_IRQFD_FLAG_DEASSERT (1 << 1)
 
 struct pciem_dma_indirect
 {
@@ -200,11 +200,11 @@ struct pciem_dma_indirect
 #define PCIEM_IOCTL_GET_BAR_INFO _IOWR(PCIEM_IOCTL_MAGIC, 19, struct pciem_bar_info_query)
 #define PCIEM_IOCTL_SET_WATCHPOINT _IOW(PCIEM_IOCTL_MAGIC, 20, struct pciem_watchpoint_config)
 #define PCIEM_IOCTL_SET_EVENTFD _IOW(PCIEM_IOCTL_MAGIC, 21, struct pciem_eventfd_config)
-#define PCIEM_IOCTL_SET_IRQ_EVENTFD _IOW(PCIEM_IOCTL_MAGIC, 22, struct pciem_irq_eventfd_config)
+#define PCIEM_IOCTL_SET_IRQFD _IOW(PCIEM_IOCTL_MAGIC, 22, struct pciem_irqfd_config)
 #define PCIEM_IOCTL_DMA_INDIRECT _IOWR(PCIEM_IOCTL_MAGIC, 24, struct pciem_dma_indirect)
 
 #define PCIEM_RING_SIZE 256
-#define PCIEM_MAX_IRQ_EVENTFDS 32
+#define PCIEM_MAX_IRQFDS 32
 
 struct pciem_shared_ring
 {
@@ -228,7 +228,7 @@ struct pciem_watchpoint_info
     struct perf_event * __percpu * perf_bp;
 };
 
-struct pciem_irq_eventfd_entry
+struct pciem_irqfd
 {
     struct eventfd_ctx *trigger;
     wait_queue_head_t *wqh;
@@ -246,7 +246,7 @@ struct pciem_irq_eventfd_entry
 
 struct pciem_irqfds {
     spinlock_t lock;
-    struct pciem_irq_eventfd_entry entries[PCIEM_MAX_IRQ_EVENTFDS];
+    struct pciem_irqfd entries[PCIEM_MAX_IRQFDS];
 };
 
 struct pciem_userspace_state
