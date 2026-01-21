@@ -24,7 +24,6 @@
 #include "pciem_userspace.h"
 
 static int pciem_device_release(struct inode *inode, struct file *file);
-static void pciem_irqfd_shutdown(struct pciem_irqfd *irqfd);
 static ssize_t pciem_device_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos);
 static long pciem_device_ioctl(struct file *file, unsigned int cmd, unsigned long arg);
 static int pciem_device_mmap(struct file *file, struct vm_area_struct *vma);
@@ -108,6 +107,20 @@ static struct pciem_pending_request *find_pending_request(struct pciem_userspace
     }
 
     return NULL;
+}
+
+static void pciem_irqfd_shutdown(struct pciem_irqfd *irqfd)
+{
+    u64 cnt;
+
+    list_del_init(&irqfd->list);
+
+    eventfd_ctx_remove_wait_queue(irqfd->trigger, &irqfd->wait, &cnt);
+
+    flush_work(&irqfd->inject_work);
+
+    eventfd_ctx_put(irqfd->trigger);
+    kfree(irqfd);
 }
 
 static void pciem_irqfds_init(struct pciem_irqfds *irqfds)
@@ -1093,21 +1106,6 @@ static void pciem_irqfd_ptable_queue_proc(struct file *file, wait_queue_head_t *
     add_wait_queue(wqh, &irqfd->wait);
     list_add_tail(&irqfd->list, &irqfds->items);
 }
-
-static void pciem_irqfd_shutdown(struct pciem_irqfd *irqfd)
-{
-    u64 cnt;
-
-    list_del_init(&irqfd->list);
-
-    eventfd_ctx_remove_wait_queue(irqfd->trigger, &irqfd->wait, &cnt);
-
-    flush_work(&irqfd->inject_work);
-
-    eventfd_ctx_put(irqfd->trigger);
-    kfree(irqfd);
-}
-
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6,12,0)
 static struct file *fd_file(struct fd fd)
