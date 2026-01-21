@@ -244,6 +244,11 @@ struct pciem_irq_eventfd_entry
 #define PCIEM_REGISTERING  1
 #define PCIEM_REGISTERED   2
 
+struct pciem_irqfds {
+    spinlock_t lock;
+    struct pciem_irq_eventfd_entry entries[PCIEM_MAX_IRQ_EVENTFDS];
+};
+
 struct pciem_userspace_state
 {
     struct pciem_root_complex *rc;
@@ -264,8 +269,7 @@ struct pciem_userspace_state
     struct eventfd_ctx *eventfd;
     spinlock_t eventfd_lock;
 
-    struct pciem_irq_eventfd_entry irq_eventfds[PCIEM_MAX_IRQ_EVENTFDS];
-    spinlock_t irq_eventfd_lock;
+    struct pciem_irqfds irqfds;
 
     bool bar_tracking_disabled;
 };
