@@ -75,10 +75,12 @@ struct pciem_root_complex
     u8 cfg[256];
 
     struct pciem_bar_info bars[PCI_STD_NUM_BARS];
+    rwlock_t bars_lock;
 
     struct platform_device *shared_bridge_pdev;
 
     struct pciem_cap_manager *cap_mgr;
+    rwlock_t cap_lock;
 
     resource_size_t total_carved_start;
     resource_size_t total_carved_end;
@@ -88,7 +90,7 @@ struct pciem_root_complex
 };
 
 void pciem_trigger_msi(struct pciem_root_complex *v, int vector);
-int pciem_register_bar(struct pciem_root_complex *v, int bar_num, resource_size_t size, u32 flags);
+int pciem_register_bar(struct pciem_root_complex *v, uint32_t bar_num, resource_size_t size, u32 flags);
 struct pciem_root_complex *pciem_alloc_root_complex(void);
 void pciem_free_root_complex(struct pciem_root_complex *v);
 int pciem_init_bar_tracking(void);
