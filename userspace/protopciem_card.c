@@ -568,14 +568,8 @@ static void destroy_device(struct device_state *st)
 
     if (st->irq_fd >= 0)
     {
-        struct pciem_irqfd_config irq_cfg;
-        irq_cfg.eventfd = -1;
-        irq_cfg.vector = 0;
-        irq_cfg.flags = 0;
-        irq_cfg.reserved = 0;
-        ioctl(st->pciem_fd, PCIEM_IOCTL_SET_IRQFD, &irq_cfg);
-
         close(st->irq_fd);
+        st->irq_fd = -1;
     }
 
     if (st->dma_bounce_buf)
