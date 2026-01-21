@@ -230,13 +230,13 @@ struct pciem_watchpoint_info
 
 struct pciem_irqfd
 {
+    struct list_head list;
     struct eventfd_ctx *trigger;
     wait_queue_entry_t wait;
     struct work_struct inject_work;
     struct pciem_userspace_state *us;
     uint32_t vector;
     uint32_t flags;
-    bool active;
 };
 
 #define PCIEM_UNREGISTERED 0
@@ -245,7 +245,7 @@ struct pciem_irqfd
 
 struct pciem_irqfds {
     spinlock_t lock;
-    struct pciem_irqfd entries[PCIEM_MAX_IRQFDS];
+    struct list_head items;
 };
 
 struct pciem_userspace_state
