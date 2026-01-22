@@ -28,6 +28,8 @@
 #define IS_ERR_PCPU(ptr) (IS_ERR((const void *)(__force const unsigned long)(ptr)))
 #define PTR_ERR_PCPU(ptr) (PTR_ERR((const void *)(__force const unsigned long)(ptr)))
 
+#define EMPTY_FD (struct fd){0}
+
 static struct file *fd_file(struct fd fd)
 {
     return fd.file;
@@ -130,23 +132,17 @@ static struct pciem_pending_request *find_pending_request(struct pciem_userspace
 static void pciem_irqfds_init(struct pciem_irqfds *irqfds)
 {
     spin_lock_init(&irqfds->lock);
-    for (int i = 0; i < PCIEM_MAX_IRQFDS; i++)
-    {
-        irqfds->entries[i].active = false;
-        irqfds->entries[i].trigger = NULL;
-        irqfds->entries[i].vector = 0;
-        irqfds->entries[i].flags = 0;
-    }
+    INIT_LIST_HEAD(&irqfds->items);
 }
 
 static void pciem_irqfds_shutdown(struct pciem_irqfds *irqfds)
 {
-    for (int i = 0; i < PCIEM_MAX_IRQFDS; i++)
-    {
-        if (irqfds->entries[i].active)
-        {
-            pciem_irqfd_shutdown(&irqfds->entries[i]);
-        }
+    struct pciem_irqfd *irqfd, *tmp;
+
+    guard(spinlock_irqsave)(&irqfds->lock);
+
+    list_for_each_entry_safe(irqfd, tmp, &irqfds->items, list) {
+        pciem_irqfd_shutdown(irqfd);
     }
 }
 
@@ -1091,9 +1087,9 @@ static int pciem_irqfd_wakeup(wait_queue_entry_t *wait, unsigned mode, int sync,
 
     if (flags & EPOLLHUP) {
         guard(spinlock_irqsave)(&irqfds->lock);
-        if (irqfd->active) {
+        if (!list_empty(&irqfd->list)) {
+            pr_info("Unregistering IRQ eventfd for vector %u\n", irqfd->vector);
             pciem_irqfd_shutdown(irqfd);
-            pr_info("Unregistered IRQ eventfd for vector %u\n", irqfd->vector);
         }
     }
 
@@ -1109,24 +1105,26 @@ static void pciem_irqfd_ptable_queue_proc(struct file *file, wait_queue_head_t *
 {
     struct pciem_poll_helper *helper = container_of(pt, struct pciem_poll_helper, pt);
     struct pciem_irqfd *irqfd = helper->irqfd;
+    struct pciem_irqfds *irqfds = &irqfd->us->irqfds;
+
+    guard(spinlock_irqsave)(&irqfds->lock);
 
     add_wait_queue(wqh, &irqfd->wait);
+    list_add_tail(&irqfd->list, &irqfds->items);
 }
 
 static void pciem_irqfd_shutdown(struct pciem_irqfd *irqfd)
 {
     u64 cnt;
 
-    if (!irqfd->active)
-        return;
+    list_del_init(&irqfd->list);
 
     eventfd_ctx_remove_wait_queue(irqfd->trigger, &irqfd->wait, &cnt);
-    irqfd->active = false;
 
     flush_work(&irqfd->inject_work);
 
     eventfd_ctx_put(irqfd->trigger);
-    irqfd->trigger = NULL;
+    kfree(irqfd);
 }
 
 static long pciem_ioctl_set_irqfd(struct pciem_userspace_state *us,
@@ -1135,10 +1133,9 @@ static long pciem_ioctl_set_irqfd(struct pciem_userspace_state *us,
     struct pciem_irqfd_config cfg;
     struct eventfd_ctx *eventfd = NULL;
     struct pciem_irqfd *irqfd = NULL;
-    struct fd f;
+    struct fd f = EMPTY_FD;
     struct pciem_poll_helper pt_helper;
-    int i, ret;
-    struct pciem_irqfds *irqfds = &us->irqfds;
+    int ret;
 
     ret = pciem_check_registered(us);
     if (ret)
@@ -1147,27 +1144,15 @@ static long pciem_ioctl_set_irqfd(struct pciem_userspace_state *us,
     if (copy_from_user(&cfg, arg, sizeof(cfg)))
         return -EFAULT;
 
-    guard(spinlock_irqsave)(&irqfds->lock);
-
-    for (i = 0; i < PCIEM_MAX_IRQFDS; i++)
-    {
-        if (irqfds->entries[i].active && irqfds->entries[i].vector == cfg.vector) {
-            irqfd = &irqfds->entries[i];
-            break;
-        } else if (!irqfd && !irqfds->entries[i].active) {
-            irqfd = &irqfds->entries[i];
-        }
-    }
-
+    irqfd = kzalloc(sizeof(*irqfd), GFP_KERNEL_ACCOUNT);
     if (!irqfd)
-        return -ENOSPC;
-
-    if (irqfd->active)
-        pciem_irqfd_shutdown(irqfd);
+        return -ENOMEM;
 
     eventfd = eventfd_ctx_fdget(cfg.eventfd);
-    if (IS_ERR(eventfd))
-        return PTR_ERR(eventfd);
+    if (IS_ERR(eventfd)) {
+        ret = PTR_ERR(eventfd);
+        goto fail;
+    }
 
     f = fdget(cfg.eventfd);
     if (fd_empty(f)) {
@@ -1179,6 +1164,7 @@ static long pciem_ioctl_set_irqfd(struct pciem_userspace_state *us,
     irqfd->vector = cfg.vector;
     irqfd->flags = cfg.flags;
     irqfd->us = us;
+    INIT_LIST_HEAD(&irqfd->list);
     INIT_WORK(&irqfd->inject_work, pciem_irqfd_work);
     init_waitqueue_func_entry(&irqfd->wait, pciem_irqfd_wakeup);
 
@@ -1189,14 +1175,17 @@ static long pciem_ioctl_set_irqfd(struct pciem_userspace_state *us,
 
     fdput(f);
 
-    irqfd->active = true;
     pr_info("Registered IRQ eventfd %d for vector %u (Direct Wakeup)\n", cfg.eventfd, cfg.vector);
 
     return 0;
 
 fail:
+    if (!fd_empty(f))
+        fdput(f);
     if (eventfd && !IS_ERR(eventfd))
         eventfd_ctx_put(eventfd);
+    if (irqfd)
+        kfree(irqfd);
     return ret;
 }
 
