@@ -57,7 +57,7 @@ struct device_state
     int instance_fd;
     int qemu_sock;
     int event_fd;
-    int irq_eventfd;
+    int irq_fd;
     atomic_t running;
     int qemu_connected;
     pthread_t qemu_thread;
@@ -214,10 +214,10 @@ static int forward_command_to_qemu(void)
 
 static void inject_irq(uint32_t vector)
 {
-    if (dev_state.irq_eventfd >= 0)
+    if (dev_state.irq_fd >= 0)
     {
         uint64_t val = 1;
-        ssize_t ret = write(dev_state.irq_eventfd, &val, sizeof(val));
+        ssize_t ret = write(dev_state.irq_fd, &val, sizeof(val));
         if (ret != sizeof(val))
         {
             struct pciem_irq_inject irq = {.vector = vector};
@@ -399,31 +399,31 @@ static int setup_eventfd(void)
     return 0;
 }
 
-static int setup_irq_eventfd(void)
+static int setup_irq_fd(void)
 {
-    struct pciem_irq_eventfd_config irq_cfg;
+    struct pciem_irqfd_config irq_cfg;
 
-    dev_state.irq_eventfd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
-    if (dev_state.irq_eventfd < 0)
+    dev_state.irq_fd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+    if (dev_state.irq_fd < 0)
     {
         perror("Failed to create IRQ eventfd");
         return -1;
     }
 
-    irq_cfg.eventfd = dev_state.irq_eventfd;
+    irq_cfg.eventfd = dev_state.irq_fd;
     irq_cfg.vector = 0;
     irq_cfg.flags = 0;
     irq_cfg.reserved = 0;
 
-    if (ioctl(dev_state.pciem_fd, PCIEM_IOCTL_SET_IRQ_EVENTFD, &irq_cfg) < 0)
+    if (ioctl(dev_state.pciem_fd, PCIEM_IOCTL_SET_IRQFD, &irq_cfg) < 0)
     {
         perror("Failed to set IRQ eventfd");
-        close(dev_state.irq_eventfd);
-        dev_state.irq_eventfd = -1;
+        close(dev_state.irq_fd);
+        dev_state.irq_fd = -1;
         return -1;
     }
 
-    printf("[\x1b[32m*\x1b[0m] IRQ eventfd configured: fd=%d\n", dev_state.irq_eventfd);
+    printf("[\x1b[32m*\x1b[0m] IRQ eventfd configured: fd=%d\n", dev_state.irq_fd);
     return 0;
 }
 
@@ -558,7 +558,7 @@ static void init_device(struct device_state *st)
     st->qemu_sock = -1;
     st->dma_bounce_buf = NULL;
     st->event_fd = -1;
-    st->irq_eventfd = -1;
+    st->irq_fd = -1;
 }
 
 static void destroy_device(struct device_state *st)
@@ -566,16 +566,16 @@ static void destroy_device(struct device_state *st)
     if (st->event_fd >= 0)
         close(st->event_fd);
 
-    if (st->irq_eventfd >= 0)
+    if (st->irq_fd >= 0)
     {
-        struct pciem_irq_eventfd_config irq_cfg;
+        struct pciem_irqfd_config irq_cfg;
         irq_cfg.eventfd = -1;
         irq_cfg.vector = 0;
         irq_cfg.flags = 0;
         irq_cfg.reserved = 0;
-        ioctl(st->pciem_fd, PCIEM_IOCTL_SET_IRQ_EVENTFD, &irq_cfg);
+        ioctl(st->pciem_fd, PCIEM_IOCTL_SET_IRQFD, &irq_cfg);
 
-        close(st->irq_eventfd);
+        close(st->irq_fd);
     }
 
     if (st->dma_bounce_buf)
@@ -678,7 +678,7 @@ int main(void)
         printf("[!] Failed to setup eventfd, falling back to busy polling\n");
     }
 
-    if (setup_irq_eventfd() < 0)
+    if (setup_irq_fd() < 0)
     {
         printf("[!] Failed to setup IRQ eventfd, falling back to ioctl\n");
     }
