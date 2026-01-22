@@ -127,6 +127,29 @@ static struct pciem_pending_request *find_pending_request(struct pciem_userspace
     return NULL;
 }
 
+static void pciem_irqfds_init(struct pciem_irqfds *irqfds)
+{
+    spin_lock_init(&irqfds->lock);
+    for (int i = 0; i < PCIEM_MAX_IRQ_EVENTFDS; i++)
+    {
+        irqfds->entries[i].active = false;
+        irqfds->entries[i].trigger = NULL;
+        irqfds->entries[i].vector = 0;
+        irqfds->entries[i].flags = 0;
+    }
+}
+
+static void pciem_irqfds_shutdown(struct pciem_irqfds *irqfds)
+{
+    for (int i = 0; i < PCIEM_MAX_IRQ_EVENTFDS; i++)
+    {
+        if (irqfds->entries[i].active)
+        {
+            pciem_irqfd_shutdown(&irqfds->entries[i]);
+        }
+    }
+}
+
 struct pciem_userspace_state *pciem_userspace_create(void)
 {
     struct pciem_userspace_state *us;
@@ -154,14 +177,7 @@ struct pciem_userspace_state *pciem_userspace_create(void)
     us->eventfd = NULL;
     spin_lock_init(&us->eventfd_lock);
 
-    spin_lock_init(&us->irq_eventfd_lock);
-    for (i = 0; i < PCIEM_MAX_IRQ_EVENTFDS; i++)
-    {
-        us->irq_eventfds[i].active = false;
-        us->irq_eventfds[i].trigger = NULL;
-        us->irq_eventfds[i].vector = 0;
-        us->irq_eventfds[i].flags = 0;
-    }
+    pciem_irqfds_init(&us->irqfds);
 
     return us;
 }
@@ -185,13 +201,7 @@ void pciem_userspace_destroy(struct pciem_userspace_state *us)
         }
     }
 
-    for (i = 0; i < PCIEM_MAX_IRQ_EVENTFDS; i++)
-    {
-        if (us->irq_eventfds[i].active)
-        {
-            pciem_irqfd_shutdown(&us->irq_eventfds[i]);
-        }
-    }
+    pciem_irqfds_shutdown(&us->irqfds);
 
     for (i = 0; i < ARRAY_SIZE(us->pending_requests); i++)
     {
@@ -1118,6 +1128,7 @@ static long pciem_ioctl_set_irq_eventfd(struct pciem_userspace_state *us,
     struct fd f;
     struct pciem_poll_helper pt_helper;
     int i, ret;
+    struct pciem_irqfds *irqfds = &us->irqfds;
 
     ret = pciem_check_registered(us);
     if (ret)
@@ -1126,15 +1137,15 @@ static long pciem_ioctl_set_irq_eventfd(struct pciem_userspace_state *us,
     if (copy_from_user(&cfg, arg, sizeof(cfg)))
         return -EFAULT;
 
-    guard(spinlock_irqsave)(&us->irq_eventfd_lock);
+    guard(spinlock_irqsave)(&irqfds->lock);
 
     for (i = 0; i < PCIEM_MAX_IRQ_EVENTFDS; i++)
     {
-        if (us->irq_eventfds[i].active && us->irq_eventfds[i].vector == cfg.vector) {
-            entry = &us->irq_eventfds[i];
+        if (irqfds->entries[i].active && irqfds->entries[i].vector == cfg.vector) {
+            entry = &irqfds->entries[i];
             break;
-        } else if (!entry && !us->irq_eventfds[i].active) {
-            entry = &us->irq_eventfds[i];
+        } else if (!entry && !irqfds->entries[i].active) {
+            entry = &irqfds->entries[i];
         }
     }
 
