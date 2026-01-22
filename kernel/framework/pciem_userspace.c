@@ -1082,10 +1082,19 @@ static void pciem_irqfd_work(struct work_struct *work)
 static int pciem_irqfd_wakeup(wait_queue_entry_t *wait, unsigned mode, int sync, void *key)
 {
     struct pciem_irqfd *irqfd = container_of(wait, struct pciem_irqfd, wait);
+    struct pciem_irqfds *irqfds = &irqfd->us->irqfds;
     __poll_t flags = key_to_poll(key);
 
     if (flags & EPOLLIN) {
         schedule_work(&irqfd->inject_work);
+    }
+
+    if (flags & EPOLLHUP) {
+        guard(spinlock_irqsave)(&irqfds->lock);
+        if (irqfd->active) {
+            pciem_irqfd_shutdown(irqfd);
+            pr_info("Unregistered IRQ eventfd for vector %u\n", irqfd->vector);
+        }
     }
 
     return 0;
@@ -1148,16 +1157,6 @@ static long pciem_ioctl_set_irqfd(struct pciem_userspace_state *us,
         } else if (!irqfd && !irqfds->entries[i].active) {
             irqfd = &irqfds->entries[i];
         }
-    }
-
-    if (cfg.eventfd < 0)
-    {
-        if (!irqfd || !irqfd->active || irqfd->vector != cfg.vector)
-            return -ENOENT;
-
-        pciem_irqfd_shutdown(irqfd);
-        pr_info("Unregistered IRQ eventfd for vector %u\n", cfg.vector);
-        return 0;
     }
 
     if (!irqfd)
