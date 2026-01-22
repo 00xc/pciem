@@ -23,6 +23,23 @@
 #include "pciem_p2p.h"
 #include "pciem_userspace.h"
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6,12,0)
+
+#define IS_ERR_PCPU(ptr) (IS_ERR((const void *)(__force const unsigned long)(ptr)))
+#define PTR_ERR_PCPU(ptr) (PTR_ERR((const void *)(__force const unsigned long)(ptr)))
+
+static struct file *fd_file(struct fd fd)
+{
+    return fd.file;
+}
+
+static bool fd_empty(struct fd fd)
+{
+    return unlikely(!fd.file);
+}
+
+#endif
+
 static int pciem_device_release(struct inode *inode, struct file *file);
 static void pciem_irqfd_shutdown(struct pciem_irq_eventfd_entry *entry);
 static ssize_t pciem_device_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos);
@@ -973,9 +990,9 @@ static long pciem_ioctl_set_watchpoint(struct pciem_userspace_state *us, struct 
 
     us->watchpoints[wp_slot].perf_bp = register_wide_hw_breakpoint(&attr, pciem_userspace_bp_handler, (void *)context);
 
-    if (IS_ERR(us->watchpoints[wp_slot].perf_bp))
+    if (IS_ERR_PCPU(us->watchpoints[wp_slot].perf_bp))
     {
-        int err = PTR_ERR(us->watchpoints[wp_slot].perf_bp);
+        int err = PTR_ERR_PCPU(us->watchpoints[wp_slot].perf_bp);
         us->watchpoints[wp_slot].perf_bp = NULL;
         pr_err("pciem_userspace: Failed to register watchpoint: %d\n", err);
         return err;
@@ -1091,19 +1108,6 @@ static void pciem_irqfd_shutdown(struct pciem_irq_eventfd_entry *entry)
     eventfd_ctx_put(entry->trigger);
     entry->trigger = NULL;
 }
-
-
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6,12,0)
-static struct file *fd_file(struct fd fd)
-{
-    return fd.file;
-}
-
-static bool fd_empty(struct fd fd)
-{
-    return unlikely(!fd.file);
-}
-#endif
 
 static long pciem_ioctl_set_irq_eventfd(struct pciem_userspace_state *us,
                                         struct pciem_irq_eventfd_config __user *arg)
