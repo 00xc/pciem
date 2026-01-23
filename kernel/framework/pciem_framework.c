@@ -623,7 +623,7 @@ int pciem_complete_init(struct pciem_root_complex *v)
         pr_info("init: BAR%u using pre-carved region [0x%llx-0x%llx]", i, (u64)start, (u64)end);
 
         struct resource *found = NULL;
-        struct resource *parent = NULL;
+        struct resource *parent = &iomem_resource;
 
         found = pciem_find_iomem_region(iomem_resource.child, start, end, &parent);
 
@@ -659,29 +659,15 @@ int pciem_complete_init(struct pciem_root_complex *v)
             mem_res->end = end;
             mem_res->flags = IORESOURCE_MEM;
 
-            if (parent)
+            pr_info("init: BAR%u inserting into parent resource: %s [0x%llx-0x%llx]", i,
+                    parent->name ? parent->name : "<unnamed>", (u64)parent->start, (u64)parent->end);
+            if (request_resource(parent, mem_res))
             {
-                pr_info("init: BAR%u inserting into parent resource: %s [0x%llx-0x%llx]", i,
-                        parent->name ? parent->name : "<unnamed>", (u64)parent->start, (u64)parent->end);
-                if (request_resource(parent, mem_res))
-                {
-                    pr_err("init: BAR%u failed to insert into parent resource", i);
-                    kfree(mem_res->name);
-                    kfree(mem_res);
-                    rc = -EBUSY;
-                    goto fail_bars;
-                }
-            }
-            else
-            {
-                if (request_resource(&iomem_resource, mem_res))
-                {
-                    pr_err("init: BAR%u phys region 0x%llx busy (request_resource failed).", i, (u64)start);
-                    kfree(mem_res->name);
-                    kfree(mem_res);
-                    rc = -EBUSY;
-                    goto fail_bars;
-                }
+                pr_err("init: BAR%u failed to insert into parent resource", i);
+                kfree(mem_res->name);
+                kfree(mem_res);
+                rc = -EBUSY;
+                goto fail_bars;
             }
 
             bar->allocated_res = mem_res;
