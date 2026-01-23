@@ -561,10 +561,68 @@ next:
     return NULL;
 }
 
+static int pciem_iomem_insert_bar(struct pciem_bar_info *bar, u32 i)
+{
+    struct resource *res = NULL;
+    struct resource *parent = &iomem_resource;
+    int ret = -ENOMEM;
+
+    res = pciem_find_iomem_region(iomem_resource.child, bar->carved_start,
+                                  bar->carved_end, &parent);
+    /* Exact match */
+    if (res)
+    {
+        pr_info("init: BAR%u found existing iomem resource: %s [0x%llx-0x%llx]",
+                i, res->name ? res->name : "<unnamed>", (u64)res->start, (u64)res->end);
+        bar->allocated_res = res;
+        bar->mem_owned_by_framework = false;
+        bar->phys_addr = bar->carved_start;
+        bar->virt_addr = NULL;
+        bar->pages = NULL;
+        return 0;
+    }
+
+    res = kzalloc(sizeof(*res), GFP_KERNEL);
+    if (!res)
+        goto fail;
+
+    res->name = kasprintf(GFP_KERNEL, "PCI BAR%u", i);
+    if (!res->name)
+        goto fail;
+
+    res->start = bar->carved_start;
+    res->end = bar->carved_end;
+    res->flags = IORESOURCE_MEM;
+
+    pr_info("init: BAR%u inserting into parent resource: %s [0x%llx-0x%llx]",
+            i, parent->name ? parent->name : "<unnamed>", (u64)parent->start, (u64)parent->end);
+
+    ret = request_resource(parent, res);
+    if (ret)
+        goto fail;
+
+    bar->allocated_res = res;
+    bar->mem_owned_by_framework = true;
+    bar->phys_addr = bar->carved_start;
+    bar->virt_addr = NULL;
+    bar->pages = NULL;
+
+    pr_info("init: BAR%u successfully reserved [0x%llx-0x%llx]",
+            i, (u64)bar->carved_start, (u64)bar->carved_end);
+    return 0;
+
+fail:
+    pr_err("init: BAR%u failed to insert into parent resource (%d)", i, ret);
+    if (res->name)
+        kfree(res);
+    if (res)
+        kfree(res);
+    return ret;
+}
+
 int pciem_complete_init(struct pciem_root_complex *v)
 {
     int rc = 0;
-    struct resource *mem_res = NULL;
     LIST_HEAD(resources);
     int busnr = 1;
     int domain = 0;
@@ -603,7 +661,6 @@ int pciem_complete_init(struct pciem_root_complex *v)
         struct pciem_bar_info *prev = i > 0 && (i % 2) == 1
             ? &v->bars[i - 1]
             : NULL;
-        resource_size_t start, end;
 
         if (bar->size == 0)
             continue;
@@ -617,66 +674,12 @@ int pciem_complete_init(struct pciem_root_complex *v)
         if (!bar->carved_start || !bar->carved_end)
             continue;
 
-        start = bar->carved_start;
-        end = bar->carved_end;
+        pr_info("init: BAR%u using pre-carved region [0x%llx-0x%llx]",
+                i, (u64)bar->carved_start, (u64)bar->carved_end);
 
-        pr_info("init: BAR%u using pre-carved region [0x%llx-0x%llx]", i, (u64)start, (u64)end);
-
-        struct resource *found = NULL;
-        struct resource *parent = &iomem_resource;
-
-        found = pciem_find_iomem_region(iomem_resource.child, start, end, &parent);
-
-        /* Exact match */
-        if (found)
-        {
-            pr_info("init: BAR%u found existing iomem resource: %s [0x%llx-0x%llx]", i,
-                    found->name ? found->name : "<unnamed>", (u64)found->start, (u64)found->end);
-            bar->allocated_res = found;
-            bar->mem_owned_by_framework = false;
-            bar->phys_addr = start;
-            bar->virt_addr = NULL;
-            bar->pages = NULL;
-        }
-        else
-        {
-            mem_res = kzalloc(sizeof(*mem_res), GFP_KERNEL);
-            if (!mem_res)
-            {
-                rc = -ENOMEM;
-                goto fail_bars;
-            }
-
-            mem_res->name = kasprintf(GFP_KERNEL, "PCI BAR%u", i);
-            if (!mem_res->name)
-            {
-                kfree(mem_res);
-                rc = -ENOMEM;
-                goto fail_bars;
-            }
-
-            mem_res->start = start;
-            mem_res->end = end;
-            mem_res->flags = IORESOURCE_MEM;
-
-            pr_info("init: BAR%u inserting into parent resource: %s [0x%llx-0x%llx]", i,
-                    parent->name ? parent->name : "<unnamed>", (u64)parent->start, (u64)parent->end);
-            if (request_resource(parent, mem_res))
-            {
-                pr_err("init: BAR%u failed to insert into parent resource", i);
-                kfree(mem_res->name);
-                kfree(mem_res);
-                rc = -EBUSY;
-                goto fail_bars;
-            }
-
-            bar->allocated_res = mem_res;
-            bar->mem_owned_by_framework = true;
-            bar->phys_addr = start;
-            bar->virt_addr = NULL;
-            bar->pages = NULL;
-            pr_info("init: BAR%u successfully reserved [0x%llx-0x%llx]", i, (u64)start, (u64)end);
-        }
+        rc = pciem_iomem_insert_bar(bar, i);
+        if (rc)
+            goto fail_bars;
     }
 
     rc = pciem_reserve_bars_res(v, &resources);
