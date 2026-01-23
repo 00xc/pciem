@@ -453,6 +453,9 @@ static int vph_write_config(struct pci_bus *bus, unsigned int devfn, int where, 
     {
         int idx = (where - PCI_BASE_ADDRESS_0) / 4;
         struct pciem_bar_info *bar = &v->bars[idx];
+        struct pciem_bar_info *prev = idx > 0 && (idx % 2)
+            ? &v->bars[idx - 1]
+            : NULL;
 
         if (bar->size != 0)
         {
@@ -469,15 +472,14 @@ static int vph_write_config(struct pci_bus *bus, unsigned int devfn, int where, 
             bar->base_addr_val = value & mask;
             return PCIBIOS_SUCCESSFUL;
         }
-        else if (idx > 0 && (idx % 2 == 1) && (v->bars[idx - 1].flags & PCI_BASE_ADDRESS_MEM_TYPE_64))
+        else if (prev && (prev->flags & PCI_BASE_ADDRESS_MEM_TYPE_64))
         {
-            resource_size_t bsize_prev = v->bars[idx - 1].size;
             u32 mask_high = 0xffffffff;
             
-            if (bsize_prev < (1ULL << 32))
+            if (prev->size < (1ULL << 32))
                 mask_high = 0;
             else
-                mask_high = (u32)(~(bsize_prev - 1) >> 32);
+                mask_high = (u32)(~(prev->size - 1) >> 32);
             
             bar->base_addr_val = value & mask_high;
             return PCIBIOS_SUCCESSFUL;
