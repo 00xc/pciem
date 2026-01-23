@@ -199,47 +199,6 @@ static void pciem_bus_init_resources(struct pciem_root_complex *v)
     pr_info("init: found pci_dev vendor=%04x device=%04x", dev->vendor, dev->device);
 }
 
-static int pciem_reserve_bar_res(struct pciem_bar_info *bar, u32 i, struct list_head *resources)
-{
-    struct resource_entry *entry;
-
-    if (!bar->allocated_res)
-        return 0;
-
-    entry = resource_list_create_entry(bar->allocated_res, i);
-    if (!entry)
-        return -ENOMEM;
-
-    resource_list_add_tail(entry, resources);
-    pr_info("init: Added BAR%u to resource list", i);
-    return 0;
-}
-
-static int pciem_reserve_bars_res(struct pciem_root_complex *v, struct list_head *resources)
-{
-    int i, rc;
-    struct pciem_bar_info *bar, *prev = NULL;
-
-    for (i = 0; i < PCI_STD_NUM_BARS; i++)
-    {
-        bar = &v->bars[i];
-        if (i > 0)
-            prev = &v->bars[i - 1];
-
-        if (!bar->size)
-            continue;
-
-        if (i & 1 && prev && prev->flags & PCI_BASE_ADDRESS_MEM_TYPE_64)
-            continue;
-
-        rc = pciem_reserve_bar_res(bar, i, resources);
-        if (rc)
-            return rc;
-    }
-
-    return 0;
-}
-
 static int pciem_map_bar_userspace(struct pciem_bar_info *bar, u32 i)
 {
     pr_info("init: BAR%u userspace mode - lightweight kernel mapping", i);
@@ -661,6 +620,7 @@ int pciem_complete_init(struct pciem_root_complex *v)
         struct pciem_bar_info *prev = i > 0 && (i % 2) == 1
             ? &v->bars[i - 1]
             : NULL;
+        struct resource_entry *entry;
 
         if (bar->size == 0)
             continue;
@@ -679,12 +639,15 @@ int pciem_complete_init(struct pciem_root_complex *v)
 
         rc = pciem_iomem_insert_bar(bar, i);
         if (rc)
-            goto fail_bars;
-    }
+            goto fail_res_list;
 
-    rc = pciem_reserve_bars_res(v, &resources);
-    if (rc)
-        goto fail_res_list;
+        entry = resource_list_create_entry(bar->allocated_res, i);
+        if (!entry)
+            goto fail_res_list;
+
+        resource_list_add_tail(entry, &resources);
+        pr_info("init: Added BAR%u to resource list", i);
+    }
 
     while (pci_find_bus(domain, busnr))
     {
@@ -766,7 +729,6 @@ fail_map:
     }
 fail_res_list:
     resource_list_free(&resources);
-fail_bars:
     pciem_cleanup_bars(v);
 fail_pdev:
     platform_device_unregister(v->shared_bridge_pdev);
