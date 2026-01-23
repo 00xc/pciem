@@ -364,6 +364,9 @@ static int vph_read_config(struct pci_bus *bus, unsigned int devfn, int where, i
     {
         int idx = (where - PCI_BASE_ADDRESS_0) / 4;
         const struct pciem_bar_info *bar = &v->bars[idx];
+        const struct pciem_bar_info *prev = idx > 0 && (idx % 2) == 1
+            ? &v->bars[idx - 1]
+            : NULL;
 
         if (bar->size != 0)
         {
@@ -374,15 +377,12 @@ static int vph_read_config(struct pci_bus *bus, unsigned int devfn, int where, i
             else
                 val = bar->base_addr_val | (bar->flags & ~PCI_BASE_ADDRESS_MEM_MASK);
         }
-        else if (idx > 0 && (idx % 2 == 1) && (v->bars[idx - 1].flags & PCI_BASE_ADDRESS_MEM_TYPE_64))
+        else if (prev && (prev->flags & PCI_BASE_ADDRESS_MEM_TYPE_64))
         {
-            resource_size_t bsize_prev = v->bars[idx - 1].size;
             u32 probe_val_high = 0xffffffff;
 
-            if (bsize_prev >= (1ULL << 32))
-            {
-                probe_val_high = (u32)(~(bsize_prev - 1) >> 32);
-            }
+            if (prev->size >= (1ULL << 32))
+                probe_val_high = (u32)(~(prev->size - 1) >> 32);
 
             if (bar->base_addr_val == probe_val_high)
                 val = probe_val_high;
@@ -453,7 +453,7 @@ static int vph_write_config(struct pci_bus *bus, unsigned int devfn, int where, 
     {
         int idx = (where - PCI_BASE_ADDRESS_0) / 4;
         struct pciem_bar_info *bar = &v->bars[idx];
-        struct pciem_bar_info *prev = idx > 0 && (idx % 2)
+        struct pciem_bar_info *prev = idx > 0 && (idx % 2) == 1
             ? &v->bars[idx - 1]
             : NULL;
 
