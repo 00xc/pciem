@@ -659,6 +659,7 @@ int pciem_complete_init(struct pciem_root_complex *v)
             goto fail_res_list;
         }
     }
+    pr_info("Using bus number %02x\n", busnr);
 
     struct pci_host_bridge *bridge;
     struct pciem_host_bridge_priv *priv;
@@ -679,12 +680,11 @@ int pciem_complete_init(struct pciem_root_complex *v)
     bridge->ops = &vph_pci_ops;
     list_splice_init(&resources, &bridge->windows);
 
+    pr_info("Probing PCI");
     rc = pci_host_probe(bridge);
-
     if (rc < 0)
     {
         pr_err("init: pci_host_probe failed: %d\n", rc);
-        rc = -ENODEV;
         goto fail_bridge;
     }
 
