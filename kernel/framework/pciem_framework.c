@@ -357,9 +357,12 @@ static int vph_read_config(struct pci_bus *bus, unsigned int devfn, int where, i
         return PCIBIOS_SUCCESSFUL;
     }
 
-    if (where >= 0x10 && where <= 0x27 && (where % 4 == 0) && size == 4)
+    if (where >= PCI_BASE_ADDRESS_0 &&
+        where < PCI_BASE_ADDRESS_0 + (4 * PCI_STD_NUM_BARS) &&
+        (where % 4 == 0) &&
+        size == 4)
     {
-        int idx = (where - 0x10) / 4;
+        int idx = (where - PCI_BASE_ADDRESS_0) / 4;
         resource_size_t bsize = v->bars[idx].size;
 
         if (bsize != 0)
@@ -401,7 +404,7 @@ static int vph_read_config(struct pci_bus *bus, unsigned int devfn, int where, i
             val = 0;
         }
     }
-    else if (where == 0x30 && size == 4)
+    else if (where == PCI_ROM_ADDRESS && size == 4)
     {
         val = 0;
     }
@@ -453,9 +456,12 @@ static int vph_write_config(struct pci_bus *bus, unsigned int devfn, int where, 
         return PCIBIOS_SUCCESSFUL;
     }
 
-    if (where >= 0x10 && where <= 0x27 && (where % 4 == 0) && size == 4)
+    if (where >= PCI_BASE_ADDRESS_0 &&
+        where < PCI_BASE_ADDRESS_0 + (4 * PCI_STD_NUM_BARS) &&
+        (where % 4 == 0) &&
+        size == 4)
     {
-        int idx = (where - 0x10) / 4;
+        int idx = (where - PCI_BASE_ADDRESS_0) / 4;
         resource_size_t bsize = v->bars[idx].size;
 
         if (bsize != 0)
@@ -491,7 +497,7 @@ static int vph_write_config(struct pci_bus *bus, unsigned int devfn, int where, 
             return PCIBIOS_SUCCESSFUL;
         }
     }
-    else if (where == 0x30)
+    else if (where == PCI_ROM_ADDRESS)
     {
         return PCIBIOS_SUCCESSFUL;
     }
