@@ -65,7 +65,7 @@ static void pciem_fixup_bridge_domain(struct pci_host_bridge *bridge,
 static int parse_phys_regions(struct pciem_root_complex *v)
 {
     char *str, *token, *cur;
-    uint32_t bar_num;
+    u32 bar_num;
     resource_size_t start, size;
 
     if (!pciem_phys_regions || strlen(pciem_phys_regions) == 0)
@@ -87,13 +87,13 @@ static int parse_phys_regions(struct pciem_root_complex *v)
         {
             if (bar_num >= PCI_STD_NUM_BARS)
             {
-                pr_warn("Invalid BAR number %d in phys_regions\n", bar_num);
+                pr_warn("Invalid BAR number %u in phys_regions\n", bar_num);
                 continue;
             }
 
             v->bars[bar_num].carved_start = start;
             v->bars[bar_num].carved_end = start + size - 1;
-            pr_info("Parsed BAR%d phys region: 0x%llx-0x%llx\n", bar_num, (u64)start, (u64)(start + size - 1));
+            pr_info("Parsed BAR%u phys region: 0x%llx-0x%llx\n", bar_num, (u64)start, (u64)(start + size - 1));
         }
     }
 
@@ -101,7 +101,7 @@ static int parse_phys_regions(struct pciem_root_complex *v)
     return 0;
 }
 
-int pciem_register_bar(struct pciem_root_complex *v, uint32_t bar_num, resource_size_t size, u32 flags)
+int pciem_register_bar(struct pciem_root_complex *v, u32 bar_num, resource_size_t size, u32 flags)
 {
     if (bar_num >= PCI_STD_NUM_BARS)
         return -EINVAL;
@@ -117,7 +117,7 @@ int pciem_register_bar(struct pciem_root_complex *v, uint32_t bar_num, resource_
 
     if (size & (size - 1))
     {
-        pr_err("pciem: BAR %d size 0x%llx is not a power of 2\n", bar_num, (u64)size);
+        pr_err("pciem: BAR %u size 0x%llx is not a power of 2\n", bar_num, (u64)size);
         return -EINVAL;
     }
 
@@ -125,7 +125,7 @@ int pciem_register_bar(struct pciem_root_complex *v, uint32_t bar_num, resource_
     v->bars[bar_num].flags = flags;
     v->bars[bar_num].base_addr_val = 0;
 
-    pr_info("pciem: Registered BAR %d: size 0x%llx, flags 0x%x\n", bar_num, (u64)size, flags);
+    pr_info("pciem: Registered BAR %u: size 0x%llx, flags 0x%x\n", bar_num, (u64)size, flags);
 
     return 0;
 }
@@ -177,7 +177,7 @@ static void pciem_msi_irq_work_func(struct irq_work *work)
 
 static void pciem_bus_copy_resources(struct pciem_root_complex *v)
 {
-    int i;
+    u32 i;
     struct pciem_bar_info *bar;
     struct pci_dev *dev __free(pci_dev_put) = pci_get_slot(v->root_bus, 0);
 
@@ -196,7 +196,7 @@ static void pciem_bus_copy_resources(struct pciem_root_complex *v)
     }
 }
 
-static int pciem_reserve_bar_res(struct pciem_bar_info *bar, int i, struct list_head *resources)
+static int pciem_reserve_bar_res(struct pciem_bar_info *bar, u32 i, struct list_head *resources)
 {
     struct resource_entry *entry;
 
@@ -208,7 +208,7 @@ static int pciem_reserve_bar_res(struct pciem_bar_info *bar, int i, struct list_
         return -ENOMEM;
 
     resource_list_add_tail(entry, resources);
-    pr_info("init: Added BAR%d to resource list", i);
+    pr_info("init: Added BAR%u to resource list", i);
     return 0;
 }
 
@@ -237,9 +237,9 @@ static int pciem_reserve_bars_res(struct pciem_root_complex *v, struct list_head
     return 0;
 }
 
-static int pciem_map_bar_userspace(struct pciem_bar_info *bar, int i)
+static int pciem_map_bar_userspace(struct pciem_bar_info *bar, u32 i)
 {
-    pr_info("init: BAR%d userspace mode - lightweight kernel mapping", i);
+    pr_info("init: BAR%u userspace mode - lightweight kernel mapping", i);
 
     bar->virt_addr = ioremap(bar->phys_addr, bar->size);
     if (bar->virt_addr) {
@@ -247,7 +247,7 @@ static int pciem_map_bar_userspace(struct pciem_bar_info *bar, int i)
         return 0;
     }
 
-    pr_warn("init: BAR%d kernel mapping failed, continuing without it (userspace will map directly)", i);
+    pr_warn("init: BAR%u kernel mapping failed, continuing without it (userspace will map directly)", i);
     bar->map_type = PCIEM_MAP_NONE;
     bar->virt_addr = NULL;
     return 0;
@@ -255,7 +255,8 @@ static int pciem_map_bar_userspace(struct pciem_bar_info *bar, int i)
 
 static int pciem_map_bars(struct pciem_root_complex *v)
 {
-    int rc, i;
+    int rc;
+    u32 i;
     struct pciem_bar_info *bar, *prev = NULL;
 
     for (i = 0; i < PCI_STD_NUM_BARS; i++)
@@ -275,15 +276,15 @@ static int pciem_map_bars(struct pciem_root_complex *v)
         rc = pciem_map_bar_userspace(bar, i);
 
         if (rc) {
-            pr_err("init: Failed to create mapping for BAR%d", i);
+            pr_err("init: Failed to create mapping for BAR%u", i);
             return rc;
         }
 
         if (bar->virt_addr) {
-            pr_info("init: BAR%d mapped at %px for emulator (map_type=%d)",
+            pr_info("init: BAR%u mapped at %px for emulator (map_type=%d)",
                     i, bar->virt_addr, bar->map_type);
         } else {
-            pr_info("init: BAR%d physical at 0x%llx (no kernel mapping)",
+            pr_info("init: BAR%u physical at 0x%llx (no kernel mapping)",
                     i, (u64)bar->phys_addr);
         }
     }
@@ -520,7 +521,7 @@ int pciem_complete_init(struct pciem_root_complex *v)
     LIST_HEAD(resources);
     int busnr = 1;
     int domain = 0;
-    int i;
+    u32 i;
 
     struct platform_device_info pdevinfo = {
         .name = "pciem",
@@ -565,14 +566,14 @@ int pciem_complete_init(struct pciem_root_complex *v)
         }
 
         bar->order = get_order(bar->size);
-        pr_info("init: preparing BAR%d physical memory (%llu KB, order %u)", i, (u64)bar->size / 1024, bar->order);
+        pr_info("init: preparing BAR%u physical memory (%llu KB, order %u)", i, (u64)bar->size / 1024, bar->order);
 
         if (bar->carved_start != 0 && bar->carved_end != 0)
         {
             start = bar->carved_start;
             end = bar->carved_end;
 
-            pr_info("init: BAR%d using pre-carved region [0x%llx-0x%llx]", i, (u64)start, (u64)end);
+            pr_info("init: BAR%u using pre-carved region [0x%llx-0x%llx]", i, (u64)start, (u64)end);
 
             struct resource *r = iomem_resource.child;
             struct resource *found = NULL;
@@ -608,7 +609,7 @@ int pciem_complete_init(struct pciem_root_complex *v)
 
             if (found && found->start == start && found->end == end)
             {
-                pr_info("init: BAR%d found existing iomem resource: %s [0x%llx-0x%llx]", i,
+                pr_info("init: BAR%u found existing iomem resource: %s [0x%llx-0x%llx]", i,
                         found->name ? found->name : "<unnamed>", (u64)found->start, (u64)found->end);
                 bar->allocated_res = found;
                 bar->mem_owned_by_framework = false;
@@ -625,7 +626,7 @@ int pciem_complete_init(struct pciem_root_complex *v)
                     goto fail_bars;
                 }
 
-                mem_res->name = kasprintf(GFP_KERNEL, "PCI BAR%d", i);
+                mem_res->name = kasprintf(GFP_KERNEL, "PCI BAR%u", i);
                 if (!mem_res->name)
                 {
                     kfree(mem_res);
@@ -639,11 +640,11 @@ int pciem_complete_init(struct pciem_root_complex *v)
 
                 if (parent)
                 {
-                    pr_info("init: BAR%d inserting into parent resource: %s [0x%llx-0x%llx]", i,
+                    pr_info("init: BAR%u inserting into parent resource: %s [0x%llx-0x%llx]", i,
                             parent->name ? parent->name : "<unnamed>", (u64)parent->start, (u64)parent->end);
                     if (request_resource(parent, mem_res))
                     {
-                        pr_err("init: BAR%d failed to insert into parent resource", i);
+                        pr_err("init: BAR%u failed to insert into parent resource", i);
                         kfree(mem_res->name);
                         kfree(mem_res);
                         rc = -EBUSY;
@@ -654,7 +655,7 @@ int pciem_complete_init(struct pciem_root_complex *v)
                 {
                     if (request_resource(&iomem_resource, mem_res))
                     {
-                        pr_err("init: BAR%d phys region 0x%llx busy (request_resource failed).", i, (u64)start);
+                        pr_err("init: BAR%u phys region 0x%llx busy (request_resource failed).", i, (u64)start);
                         kfree(mem_res->name);
                         kfree(mem_res);
                         rc = -EBUSY;
@@ -667,7 +668,7 @@ int pciem_complete_init(struct pciem_root_complex *v)
                 bar->phys_addr = start;
                 bar->virt_addr = NULL;
                 bar->pages = NULL;
-                pr_info("init: BAR%d successfully reserved [0x%llx-0x%llx]", i, (u64)start, (u64)end);
+                pr_info("init: BAR%u successfully reserved [0x%llx-0x%llx]", i, (u64)start, (u64)end);
             }
         }
     }
