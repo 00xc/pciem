@@ -327,6 +327,44 @@ static void pciem_cleanup_bars(struct pciem_root_complex *v)
         pciem_cleanup_bar(&v->bars[i]);
 }
 
+static u32 vph_read_bar_address(const struct pciem_root_complex *v, u32 idx)
+{
+    u32 val;
+    const struct pciem_bar_info *bar = &v->bars[idx];
+    const struct pciem_bar_info *prev = idx > 0 && (idx % 2) == 1
+        ? &v->bars[idx - 1]
+        : NULL;
+
+    if (bar->size != 0)
+    {
+        u32 probe_val = (u32)(~(bar->size - 1));
+
+        if (bar->base_addr_val == probe_val)
+            val = probe_val | (bar->flags & ~PCI_BASE_ADDRESS_MEM_MASK);
+        else
+            val = bar->base_addr_val | (bar->flags & ~PCI_BASE_ADDRESS_MEM_MASK);
+
+        return val;
+    }
+
+    if (prev && (prev->flags & PCI_BASE_ADDRESS_MEM_TYPE_64))
+    {
+        u32 probe_val_high = 0xffffffff;
+
+        if (prev->size >= (1ULL << 32))
+            probe_val_high = (u32)(~(prev->size - 1) >> 32);
+
+        if (bar->base_addr_val == probe_val_high)
+            val = probe_val_high;
+        else
+            val = bar->base_addr_val;
+
+        return val;
+    }
+
+    return 0;
+}
+
 static int vph_read_config(struct pci_bus *bus, unsigned int devfn, int where, int size, u32 *value)
 {
     struct pciem_root_complex *v;
@@ -363,38 +401,11 @@ static int vph_read_config(struct pci_bus *bus, unsigned int devfn, int where, i
         size == 4)
     {
         int idx = (where - PCI_BASE_ADDRESS_0) / 4;
-        const struct pciem_bar_info *bar = &v->bars[idx];
-        const struct pciem_bar_info *prev = idx > 0 && (idx % 2) == 1
-            ? &v->bars[idx - 1]
-            : NULL;
-
-        if (bar->size != 0)
-        {
-            u32 probe_val = (u32)(~(bar->size - 1));
-
-            if (bar->base_addr_val == probe_val)
-                val = probe_val | (bar->flags & ~PCI_BASE_ADDRESS_MEM_MASK);
-            else
-                val = bar->base_addr_val | (bar->flags & ~PCI_BASE_ADDRESS_MEM_MASK);
-        }
-        else if (prev && (prev->flags & PCI_BASE_ADDRESS_MEM_TYPE_64))
-        {
-            u32 probe_val_high = 0xffffffff;
-
-            if (prev->size >= (1ULL << 32))
-                probe_val_high = (u32)(~(prev->size - 1) >> 32);
-
-            if (bar->base_addr_val == probe_val_high)
-                val = probe_val_high;
-            else
-                val = bar->base_addr_val;
-        }
-        else
-        {
-            val = 0;
-        }
+        *value = vph_read_bar_address(v, idx);
+        return PCIBIOS_SUCCESSFUL;
     }
-    else if (where == PCI_ROM_ADDRESS && size == 4)
+
+    if (where == PCI_ROM_ADDRESS && size == 4)
     {
         val = 0;
     }
