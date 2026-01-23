@@ -684,9 +684,8 @@ int pciem_complete_init(struct pciem_root_complex *v)
     if (rc < 0)
     {
         pr_err("init: pci_host_probe failed: %d\n", rc);
-        pci_free_host_bridge(bridge);
         rc = -ENODEV;
-        goto fail_res_list;
+        goto fail_bridge;
     }
 
     v->root_bus = bridge->bus;
@@ -695,7 +694,7 @@ int pciem_complete_init(struct pciem_root_complex *v)
     {
         pr_err("init: pci_scan_bus failed");
         rc = -ENODEV;
-        goto fail_res_list;
+        goto fail_bridge;
     }
 
     pci_bus_add_devices(v->root_bus);
@@ -727,6 +726,8 @@ fail_map:
     {
         pci_remove_root_bus(v->root_bus);
     }
+fail_bridge:
+    pci_free_host_bridge(bridge);
 fail_res_list:
     resource_list_free(&resources);
     pciem_cleanup_bars(v);
