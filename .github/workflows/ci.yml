@@ -2,7 +2,9 @@ name: CI
 
 on:
   push:
+    branches: [ "main" ]
   pull_request:
+    branches: [ "main" ]
 
 jobs:
   ubuntu:
@@ -26,7 +28,7 @@ jobs:
       - name: Build
         run: |
           KDIR=$(ls -d /lib/modules/*/build | head -n1)
-          make all -j $(nproc) KDIR=$KDIR
+          make all -j $(nproc) KDIR=$KDIR KCFLAGS=-Werror
 
   ubuntu-lts:
     name: Build (Ubuntu LTS)
@@ -49,7 +51,7 @@ jobs:
       - name: Build
         run: |
           KDIR=$(ls -d /lib/modules/*/build | head -n1)
-          make all -j $(nproc) KDIR=$KDIR
+          make all -j $(nproc) KDIR=$KDIR KCFLAGS=-Werror
 
   debian:
     name: Build (Debian stable)
@@ -76,7 +78,7 @@ jobs:
       - name: Build
         run: |
           KDIR=$(ls -d /usr/src/linux-headers-* | head -n1)
-          make all -j $(nproc) KDIR=$KDIR
+          make all -j $(nproc) KDIR=$KDIR KCFLAGS=-Werror
 
   opensuse-tumbleweed:
     # Use a very new kernel
@@ -106,4 +108,4 @@ jobs:
       - name: Build
         run: |
           KDIR=$(ls -d /usr/src/linux-obj/*/* | head -n1)
-          make all -j $(nproc) KDIR=$KDIR
+          make all -j $(nproc) KDIR=$KDIR KCFLAGS=-Werror
