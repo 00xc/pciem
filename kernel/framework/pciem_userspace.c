@@ -159,14 +159,37 @@ static void pciem_irqfds_shutdown(struct pciem_irqfds *irqfds)
     }
 }
 
+static int pciem_shared_ring_alloc(struct pciem_userspace_state *us)
+{
+    struct page *page;
+    int order = get_order(sizeof(struct pciem_shared_ring));
+
+    page = alloc_pages(GFP_KERNEL_ACCOUNT | __GFP_ZERO | __GFP_COMP, order);
+    if (!page)
+        return -ENOMEM;
+
+    us->shared_ring = page_address(page);
+    atomic_set(&us->shared_ring->head, 0);
+    atomic_set(&us->shared_ring->tail, 0);
+    spin_lock_init(&us->shared_ring_lock);
+
+    return 0;
+}
+
 struct pciem_userspace_state *pciem_userspace_create(void)
 {
     struct pciem_userspace_state *us;
-    int i;
+    int i, ret;
 
     us = kzalloc(sizeof(*us), GFP_KERNEL);
     if (!us)
         return ERR_PTR(-ENOMEM);
+
+    ret = pciem_shared_ring_alloc(us);
+    if (ret) {
+        kfree(us);
+        return ERR_PTR(ret);
+    }
 
     for (i = 0; i < ARRAY_SIZE(us->pending_requests); i++)
         INIT_HLIST_HEAD(&us->pending_requests[i]);
@@ -223,36 +246,15 @@ void pciem_userspace_destroy(struct pciem_userspace_state *us)
         }
     }
 
-    if (us->shared_ring)
-        __free_pages(virt_to_page(us->shared_ring), get_order(sizeof(struct pciem_shared_ring)));
+    __free_pages(virt_to_page(us->shared_ring), get_order(sizeof(struct pciem_shared_ring)));
 
     kfree(us);
-}
-
-static int pciem_shared_ring_alloc(struct pciem_userspace_state *us)
-{
-    struct page *page;
-    int order = get_order(sizeof(struct pciem_shared_ring));
-
-    page = alloc_pages(GFP_KERNEL_ACCOUNT | __GFP_ZERO | __GFP_COMP, order);
-    if (!page)
-        return -ENOMEM;
-
-    us->shared_ring = page_address(page);
-    atomic_set(&us->shared_ring->head, 0);
-    atomic_set(&us->shared_ring->tail, 0);
-    spin_lock_init(&us->shared_ring_lock);
-
-    return 0;
 }
 
 static bool pciem_shared_ring_push(struct pciem_userspace_state *us,
                                    struct pciem_event *event)
 {
     int tail, next_tail, head;
-
-    if (!us->shared_ring)
-        return true;
 
     guard(spinlock_irqsave)(&us->shared_ring_lock);
 
@@ -444,13 +446,6 @@ static int pciem_device_mmap(struct file *file, struct vm_area_struct *vma)
     struct pciem_userspace_state *us = file->private_data;
     unsigned long pfn;
     int ret;
-
-    if (!us->shared_ring)
-    {
-        ret = pciem_shared_ring_alloc(us);
-        if (ret)
-            return ret;
-    }
 
     pfn = page_to_pfn(virt_to_page(us->shared_ring));
     ret = remap_pfn_range(vma, vma->vm_start, pfn, vma->vm_end - vma->vm_start, vma->vm_page_prot);
