@@ -269,6 +269,15 @@ static bool pciem_shared_ring_push(struct pciem_userspace_state *us,
     return true;
 }
 
+static void pciem_eventfd_signal(struct pciem_userspace_state *us)
+{
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(6,7,0)
+        eventfd_signal(us->eventfd, 1);
+#else
+        eventfd_signal(us->eventfd);
+#endif
+}
+
 void pciem_userspace_queue_event(struct pciem_userspace_state *us, struct pciem_event *event)
 {
     unsigned long flags;
@@ -284,13 +293,7 @@ void pciem_userspace_queue_event(struct pciem_userspace_state *us, struct pciem_
 
     spin_lock_irqsave(&us->eventfd_lock, flags);
     if (us->eventfd)
-    {
-#if LINUX_VERSION_CODE <= KERNEL_VERSION(6,7,0)
-        eventfd_signal(us->eventfd, 1);
-#else
-        eventfd_signal(us->eventfd);
-#endif
-    }
+        pciem_eventfd_signal(us);
     spin_unlock_irqrestore(&us->eventfd_lock, flags);
 }
 
