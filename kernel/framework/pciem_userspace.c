@@ -166,6 +166,23 @@ static void pciem_irqfds_shutdown(struct pciem_irqfds *irqfds)
     }
 }
 
+static void pciem_tracing_destroy(struct pciem_userspace_state *us)
+{
+    unsigned int i;
+
+    for (i = 0; i < PCI_STD_NUM_BARS; ++i) {
+        if (us->tracers[i].us) {
+            smptrace_destroy(&us->tracers[i].ctx);
+            us->tracers[i].us = NULL;
+        }
+    }
+}
+
+static void pciem_tracing_init(struct pciem_userspace_state *us)
+{
+    memset(&us->tracers, 0, ARRAY_SIZE(us->tracers));
+}
+
 static int pciem_shared_ring_alloc(struct pciem_userspace_state *us)
 {
     struct page *page;
@@ -191,6 +208,8 @@ struct pciem_userspace_state *pciem_userspace_create(void)
     us = kzalloc(sizeof(*us), GFP_KERNEL);
     if (!us)
         return ERR_PTR(-ENOMEM);
+
+    pciem_tracing_init(us);
 
     ret = pciem_shared_ring_alloc(us);
     if (ret) {
@@ -223,6 +242,7 @@ void pciem_userspace_destroy(struct pciem_userspace_state *us)
     if (!us)
         return;
 
+    pciem_tracing_destroy(us);
     pciem_irqfds_shutdown(&us->irqfds);
 
     for (i = 0; i < ARRAY_SIZE(us->pending_requests); i++)
@@ -1101,6 +1121,91 @@ out:
     return ret;
 }
 
+static void pciem_notif_trace(struct smptrace_ctx *ctx, struct smptrace_io *io,
+                              uint32_t ev_type)
+{
+    struct pciem_tracer *tracer = container_of(ctx, struct pciem_tracer, ctx);
+    struct pciem_event ev = {0};
+
+    ev.bar = ctx->opaque;
+    ev.offset = io->offset;
+    ev.size = io->size;
+    ev.type = ev_type;
+    switch (io->size) {
+    case 1:
+        ev.data = io->data.byte;
+        break;
+    case 2:
+        ev.data = io->data.word;
+        break;
+    case 4:
+        ev.data = io->data.dword;
+        break;
+    case 8:
+        ev.data = io->data.qword;
+        break;
+    default:
+        BUG();
+    }
+    pciem_userspace_queue_event(tracer->us, &ev);
+}
+
+static void pciem_notif_write(struct smptrace_ctx *ctx, struct smptrace_io *io)
+{
+    pciem_notif_trace(ctx, io, PCIEM_EVENT_MMIO_WRITE);
+}
+
+static void pciem_notif_read(struct smptrace_ctx *ctx, struct smptrace_io *io)
+{
+    pciem_notif_trace(ctx, io, PCIEM_EVENT_MMIO_READ);
+}
+
+static int pciem_ioctl_trace_bar(struct pciem_userspace_state *us,
+                                 struct pciem_trace_bar __user *arg)
+{
+    struct pciem_trace_bar req;
+    struct pciem_bar_info *bar;
+    struct pciem_tracer *tracer;
+    int ret;
+
+    if (copy_from_user(&req, arg, sizeof(req)))
+        return -EFAULT;
+
+    if (req.bar_index >= PCI_STD_NUM_BARS)
+        return -EINVAL;
+
+    guard(write_lock)(&us->rc->bars_lock);
+
+    bar = &us->rc->bars[req.bar_index];
+    tracer = &us->tracers[req.bar_index];
+    if (tracer->us)
+        return -EINVAL;
+
+    if (!bar->carved_start || !bar->size) {
+        pr_warn("cannot trace BAR%u, not registered", req.bar_index);
+        return -ENXIO;
+    }
+
+    memset(tracer, 0, sizeof(*tracer));
+    tracer->ctx.opaque = req.bar_index;
+    tracer->ctx.pa = bar->carved_start;
+    tracer->ctx.len = bar->size;
+    if (req.flags & PCIEM_TRACE_WRITES)
+        tracer->ctx.notif.write = pciem_notif_write;
+    if (req.flags & PCIEM_TRACE_READS)
+        tracer->ctx.notif.read = pciem_notif_read;
+    tracer->ctx.stop_writes = req.flags & PCIEM_TRACE_STOP_WRITES;
+    ret = smptrace_init(&tracer->ctx);
+    if (ret)
+        return ret;
+    tracer->us = us;
+
+    pr_info("Beginning tracing on BAR%u (PA = 0x%llx)",
+            req.bar_index, bar->carved_start);
+
+    return 0;
+}
+
 static long pciem_device_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
     struct pciem_userspace_state *us = file->private_data;
@@ -1145,6 +1250,9 @@ static long pciem_device_ioctl(struct file *file, unsigned int cmd, unsigned lon
 
     case PCIEM_IOCTL_DMA_INDIRECT:
         return pciem_ioctl_dma_indirect(us, (struct pciem_dma_indirect __user *)arg);
+
+    case PCIEM_IOCTL_TRACE_BAR:
+        return pciem_ioctl_trace_bar(us, (struct pciem_trace_bar __user*)arg);
 
     default:
         return -ENOTTY;
