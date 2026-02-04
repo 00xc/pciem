@@ -801,60 +801,6 @@ static long pciem_ioctl_get_bar_info(struct pciem_userspace_state *us, struct pc
 }
 
 
-static void __iomem *pciem_resolve_bar_address(struct pci_dev *pdev, u32 bar, uint32_t flags)
-{
-    void __iomem *bar_base = NULL;
-    bool try_kprobes = true;
-    bool try_manual = true;
-
-    if (flags & PCIEM_WP_FLAG_BAR_KPROBES) {
-        try_manual = false;
-    } else if (flags & PCIEM_WP_FLAG_BAR_MANUAL) {
-        try_kprobes = false;
-    }
-
-    if (try_kprobes) {
-        bar_base = pciem_get_driver_bar_vaddr(pdev, bar);
-        if (bar_base) {
-            pr_debug("pciem_userspace: BAR%u resolved via kprobes\n", bar);
-            return bar_base;
-        }
-        if (!try_manual) {
-            pr_warn("pciem_userspace: BAR%u not found via kprobes (kprobes-only mode)\n", bar);
-            return NULL;
-        }
-    }
-
-    if (try_manual) {
-        void *drvdata = pci_get_drvdata(pdev);
-        if (drvdata) {
-            /*
-                FIXME?:
-
-                This assumes that the driver's private data structure is as follows:
-
-                struct drvdata {
-                    struct pci_dev *pdev;
-                    void __iomem *bars[x];
-                    ...
-                };
-            */
-            void __iomem **bar_array = (void __iomem **)((char *)drvdata + sizeof(struct pci_dev *));
-            bar_base = bar_array[bar];
-            if (bar_base) {
-                pr_debug("pciem_userspace: BAR%u resolved via manual method\n", bar);
-                return bar_base;
-            }
-        }
-        if (!try_kprobes) {
-            pr_warn("pciem_userspace: BAR%u not found via manual method (manual-only mode)\n", bar);
-            return NULL;
-        }
-    }
-    
-    return NULL;
-}
-
 static long pciem_ioctl_set_eventfd(struct pciem_userspace_state *us, struct pciem_eventfd_config __user *arg)
 {
     struct pciem_eventfd_config cfg;

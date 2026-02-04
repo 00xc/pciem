@@ -744,11 +744,6 @@ static int __init pciem_init(void)
     int ret;
     pr_info("init: pciem framework loading\n");
 
-    ret = pciem_init_bar_tracking();
-    if (ret) {
-        pr_info("init: BAR tracking unavailable\n");
-    }
-
     ret = pciem_userspace_init();
     if (ret) {
         pr_err("init: Failed to initialize userspace support: %d\n", ret);
@@ -783,8 +778,6 @@ static void __exit pciem_exit(void)
     misc_deregister(&pciem_dev);
     pciem_userspace_cleanup();
     pr_info("exit: Unregistered /dev/pciem\n");
-
-    pciem_cleanup_bar_tracking();
     pr_info("exit: pciem framework done");
 }
 

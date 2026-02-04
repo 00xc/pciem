@@ -252,8 +252,6 @@ struct pciem_userspace_state
     spinlock_t eventfd_lock;
 
     struct pciem_irqfds irqfds;
-
-    bool bar_tracking_disabled;
 };
 
 struct pciem_pending_request

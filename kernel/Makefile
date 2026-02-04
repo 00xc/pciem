@@ -6,7 +6,6 @@ pciem-objs := framework/pciem_framework.o \
               framework/pciem_capabilities.o \
               framework/pciem_p2p.o \
               framework/pciem_dma.o \
-			  framework/pciem_bar.o \
 			  framework/pciem_userspace.o
 
 obj-m += pciem.o
