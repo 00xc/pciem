@@ -23,7 +23,7 @@ jobs:
             flex \
             bison \
             libelf-dev \
-            linux-headers-generic
+            linux-headers-$(uname -r)
 
       - name: Build
         run: |
@@ -46,7 +46,7 @@ jobs:
             flex \
             bison \
             libelf-dev \
-            linux-headers-generic
+            linux-headers-$(uname -r)
 
       - name: Build
         run: |
