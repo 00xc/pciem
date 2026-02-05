@@ -1218,7 +1218,7 @@ static void dev_event_loop(void *arg)
         if (ret == 0)
             continue;
 
-        read(dev->event_fd, &tmp, sizeof(tmp));
+        (void)read(dev->event_fd, &tmp, sizeof(tmp));
 
         while (1) {
             head = atomic_load(&ring->head);
