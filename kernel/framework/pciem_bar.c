@@ -1,3 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/*
+ * Copyright (C) 2025-2026 Joel Bueno
+ *   Author(s): Joel Bueno <buenocalvachehjoel@gmail.com>
+ *              Carlos López <carlos.lopezr4096@gmail.com>
+ */
+
 #include "pciem_framework.h"
 #include <linux/hashtable.h>
 #include <linux/kprobes.h>

@@ -1,3 +1,9 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
+/*
+ *  Copyright (C) 2025-2026  Joel Bueno
+ *  Copyright (C) 2025-2026  Carlos López
+ */
+
 #ifndef PCIEM_CAPABILITIES_H
 #define PCIEM_CAPABILITIES_H
 

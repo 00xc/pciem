@@ -1,3 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/*
+ * Copyright (C) 2025-2026 Joel Bueno
+ *   Author(s): Joel Bueno <buenocalvachehjoel@gmail.com>
+ *              Carlos López <carlos.lopezr4096@gmail.com>
+ */
+
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/pci.h>
@@ -950,6 +957,6 @@ static const struct file_operations pciem_fops = {
 module_init(pciem_init);
 module_exit(pciem_exit);
 
-MODULE_LICENSE("Dual MIT/GPL");
+MODULE_LICENSE("GPL v2");
 MODULE_AUTHOR("cakehonolulu (cakehonolulu@protonmail.com)");
-MODULE_DESCRIPTION("Synthetic PCIe device with QEMU forwarding");
+MODULE_DESCRIPTION("Synthetic PCIe device framework");
