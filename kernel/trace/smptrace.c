@@ -148,14 +148,7 @@ static int __exit_ioremap(struct kretprobe_instance *ri, struct pt_regs *regs)
 	pr_info("poisoning VA=0x%lx:%lx (PA=0x%llx:%lx)",
 	        va, args->len, (unsigned long long)ctx->pa, ctx->len);
 
-	spin_lock_irqsave(&ctx->lock, flags);
-	list_add_tail(&map->list, &ctx->maps);
-	spin_unlock_irqrestore(&ctx->lock, flags);
-
 	if (poison_pte(ctx, va, args->len)) {
-		spin_lock_irqsave(&ctx->lock, flags);
-		list_del(&map->list);
-		spin_unlock_irqrestore(&ctx->lock, flags);
 		kfree(map);
 
 		regs_set_return_value(regs, 0);
@@ -163,6 +156,10 @@ static int __exit_ioremap(struct kretprobe_instance *ri, struct pt_regs *regs)
 
 		pr_warn("failed to poison VA=0x%lx:%lx (PA=0x%llx:%lx)",
 		        va, args->len, args->pa, args->len);
+	} else {
+		spin_lock_irqsave(&ctx->lock, flags);
+		list_add_tail(&map->list, &ctx->maps);
+		spin_unlock_irqrestore(&ctx->lock, flags);
 	}
 
 	return 0;
