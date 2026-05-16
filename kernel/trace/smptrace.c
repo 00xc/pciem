@@ -119,10 +119,8 @@ static int __enter_ioremap(struct kretprobe_instance *ri, struct pt_regs *regs)
 	return 0;
 }
 
-static int poison_pte(struct smptrace_ctx *ctx, unsigned long va,
-                      unsigned int len);
-static void restore_pte(struct smptrace_ctx *ctx, unsigned long va,
-                        unsigned int len);
+static int poison_pte(struct smptrace_ctx *ctx, struct smptrace_map *map);
+static void restore_pte(struct smptrace_ctx *ctx, struct smptrace_map *map);
 
 static int __exit_ioremap(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
@@ -144,11 +142,12 @@ static int __exit_ioremap(struct kretprobe_instance *ri, struct pt_regs *regs)
 	map->va  = va;
 	map->len = args->len;
 	map->pa  = args->pa;
+	INIT_LIST_HEAD(&map->ptes);
 
 	pr_info("poisoning VA=0x%lx:%lx (PA=0x%llx:%lx)",
 	        va, args->len, (unsigned long long)ctx->pa, ctx->len);
 
-	if (poison_pte(ctx, va, args->len)) {
+	if (poison_pte(ctx, map)) {
 		kfree(map);
 
 		regs_set_return_value(regs, 0);
@@ -188,16 +187,16 @@ static int __enter_iounmap(struct kprobe *kp, struct pt_regs *regs)
 
 	pr_info("restoring VA=0x%lx (PA=0x%llx)", found->va,
 	        (unsigned long long)found->pa);
-	restore_pte(ctx, found->va, found->len);
+	restore_pte(ctx, found);
 	kfree(found);
 	return 0;
 }
 
-static struct smptrace_pte *__find_pte(struct smptrace_ctx *ctx, unsigned long va)
+static struct smptrace_pte *__find_pte(struct smptrace_map *map, unsigned long va)
 {
 	struct smptrace_pte *tmp;
 
-	list_for_each_entry(tmp, &ctx->ptes, list) {
+	list_for_each_entry(tmp, &map->ptes, list) {
 		if (tmp->va == va)
 			return tmp;
 	}
@@ -245,8 +244,8 @@ fail_badarea:
 
 /*
  * Each backend must provide:
- *   static int  poison_pte(struct smptrace_ctx *, unsigned long va, unsigned int len);
- *   static void restore_pte(struct smptrace_ctx *, unsigned long va, unsigned int len);
+ *   static int  poison_pte(struct smptrace_ctx *, struct smptrace_map *);
+ *   static void restore_pte(struct smptrace_ctx *, struct smptrace_map *);
  *   static int  smptrace_activate(struct smptrace_ctx *);
  *
  * Backends may freely call emulate_read(), emulate_write(), __find_pte(),
@@ -268,7 +267,6 @@ int smptrace_init(struct smptrace_ctx *ctx)
 {
 	int ret;
 
-	INIT_LIST_HEAD(&ctx->ptes);
 	INIT_LIST_HEAD(&ctx->maps);
 	spin_lock_init(&ctx->lock);
 
@@ -303,7 +301,7 @@ static void smptrace_deactivate(struct smptrace_ctx *ctx)
 		list_del(&map->list);
 		spin_unlock_irqrestore(&ctx->lock, flags);
 
-		restore_pte(ctx, map->va, map->len);
+		restore_pte(ctx, map);
 		kfree(map);
 
 		spin_lock_irqsave(&ctx->lock, flags);

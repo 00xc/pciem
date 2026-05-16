@@ -102,16 +102,12 @@ static unsigned long arm64_level2size(unsigned int level)
  * This also overcomes the limitation of certain unexported functions (That
  * would probably make this much more cleaner...) erroring out on modpost.
  */
-static int poison_pte(struct smptrace_ctx *ctx, unsigned long va,
-                      unsigned int len)
+static int poison_pte(struct smptrace_ctx *ctx, struct smptrace_map *map)
 {
-	int64_t remain = len;
+	unsigned long va = map->va;
+	int64_t remain = map->len;
 	struct smptrace_pte *orig, *tmp;
-	struct list_head local_ptes;
-	unsigned long flags;
 	int ret;
-
-	INIT_LIST_HEAD(&local_ptes);
 
 	while (remain > 0) {
 		unsigned int level;
@@ -151,34 +147,28 @@ static int poison_pte(struct smptrace_ctx *ctx, unsigned long va,
 
 		remain -= arm64_level2size(level);
 		va     += arm64_level2size(level);
-		list_add_tail(&orig->list, &local_ptes);
+		list_add_tail(&orig->list, &map->ptes);
 	}
 
-	spin_lock_irqsave(&ctx->lock, flags);
-	list_splice_tail(&local_ptes, &ctx->ptes);
-	spin_unlock_irqrestore(&ctx->lock, flags);
-
-	flush_tlb_kernel_range(va - len, va);
+	flush_tlb_kernel_range(map->va, va);
 	return 0;
 
 fail:
-	list_for_each_entry_safe(orig, tmp, &local_ptes, list) {
+	list_for_each_entry_safe(orig, tmp, &map->ptes, list) {
 		list_del(&orig->list);
 		kfree(orig);
 	}
-	flush_tlb_kernel_range(va - (len - remain), va);
+	flush_tlb_kernel_range(va - (map->len - remain), va);
 	return ret;
 }
 
 /*
  * Restore the PTEs corresponding to the given VA range.
  */
-static void restore_pte(struct smptrace_ctx *ctx, unsigned long va,
-                        unsigned int len)
+static void restore_pte(struct smptrace_ctx *ctx, struct smptrace_map *map)
 {
-	int64_t remain = len;
-	unsigned long va_start = va;
-	unsigned long flags;
+	unsigned long va = map->va;
+	int64_t remain = map->len;
 
 	while (remain > 0) {
 		unsigned int level;
@@ -194,18 +184,15 @@ static void restore_pte(struct smptrace_ctx *ctx, unsigned long va,
 
 		step = arm64_level2size(level);
 
-		spin_lock_irqsave(&ctx->lock, flags);
-		orig = __find_pte(ctx, va);
-		if (orig)
-			list_del(&orig->list);
-		spin_unlock_irqrestore(&ctx->lock, flags);
-
+		orig = __find_pte(map, va);
 		if (!orig) {
 			pr_err("could not find saved PTE for va=0x%lx\n", va);
 			remain -= step;
 			va     += step;
 			continue;
 		}
+
+		list_del(&orig->list);
 
 		if (orig->level != level)
 			pr_warn("PTE level mismatch for va=0x%lx (saved=%u walk=%u)",
@@ -230,7 +217,7 @@ static void restore_pte(struct smptrace_ctx *ctx, unsigned long va,
 		kfree(orig);
 	}
 
-	flush_tlb_kernel_range(va_start, va_start + len);
+	flush_tlb_kernel_range(map->va, map->va + map->len);
 }
 
 struct arm64_ls_insn {

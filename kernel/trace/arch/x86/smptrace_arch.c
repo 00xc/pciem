@@ -40,17 +40,13 @@ static u64 level2size(unsigned int level)
 	}
 }
 
-static int poison_pte(struct smptrace_ctx *ctx, unsigned long va,
-                      unsigned int len)
+static int poison_pte(struct smptrace_ctx *ctx, struct smptrace_map *map)
 {
-	int64_t remain = len;
+	int64_t remain = map->len;
+	unsigned long va = map->va;
 	unsigned int level;
 	struct smptrace_pte *orig, *tmp;
-	struct list_head local_ptes;
-	unsigned long flags;
 	int ret;
-
-	INIT_LIST_HEAD(&local_ptes);
 
 	while (remain > 0) {
 		pte_t *ptep = lookup_address(va, &level);
@@ -70,7 +66,7 @@ static int poison_pte(struct smptrace_ctx *ctx, unsigned long va,
 		orig->va    = va;
 		orig->level = level;
 
-        /* Swap out PTE */
+		/* Swap out PTE */
 		switch (level) {
 		case PG_LEVEL_4K: {
 			pte_t pte = native_local_ptep_get_and_clear(ptep);
@@ -103,12 +99,8 @@ static int poison_pte(struct smptrace_ctx *ctx, unsigned long va,
 
 		remain -= level2size(level);
 		va     += level2size(level);
-		list_add_tail(&orig->list, &local_ptes);
+		list_add_tail(&orig->list, &map->ptes);
 	}
-
-	spin_lock_irqsave(&ctx->lock, flags);
-	list_splice_tail(&local_ptes, &ctx->ptes);
-	spin_unlock_irqrestore(&ctx->lock, flags);
 
 	__flush_tlb();
 	return 0;
@@ -117,7 +109,7 @@ fail:
 	/* Free items, but do not bother to unpoison the PTEs. Let our
 	 * caller detect the error, and simply return NULL to the caller
 	 * of ioremap() */
-	list_for_each_entry_safe(orig, tmp, &local_ptes, list) {
+	list_for_each_entry_safe(orig, tmp, &map->ptes, list) {
 		list_del(&orig->list);
 		kfree(orig);
 	}
@@ -125,11 +117,10 @@ fail:
 	return ret;
 }
 
-static void restore_pte(struct smptrace_ctx *ctx, unsigned long va,
-                        unsigned int len)
+static void restore_pte(struct smptrace_ctx *ctx, struct smptrace_map *map)
 {
-	int64_t remain = len;
-	unsigned long flags;
+	unsigned long va = map->va;
+	int64_t remain = map->len;
 
 	while (remain > 0) {
 		unsigned int level;
@@ -142,18 +133,15 @@ static void restore_pte(struct smptrace_ctx *ctx, unsigned long va,
 			continue;
 		}
 
-		spin_lock_irqsave(&ctx->lock, flags);
-		orig = __find_pte(ctx, va);
-		if (orig)
-			list_del(&orig->list);
-		spin_unlock_irqrestore(&ctx->lock, flags);
-
+		orig = __find_pte(map, va);
 		if (!orig) {
 			pr_err("could not find saved PTE for va=0x%lx\n", va);
 			remain -= level2size(level);
 			va     += level2size(level);
 			continue;
 		}
+
+		list_del(&orig->list);
 
 		if (orig->level != level)
 			pr_warn("PTE level mismatch for va=0x%lx (saved=%u walk=%u)",
