@@ -7,8 +7,10 @@
 #include <asm/debugreg.h>
 #include <asm/traps.h>
 #include <asm/pgtable.h>
+#include <linux/version.h>
 #include "insn.h"
 #include "insn-eval.h"
+#include "trace/smptrace_internal.h"
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6, 12, 0)
 static inline pud_t pud_mkinvalid(pud_t pud)
@@ -40,7 +42,7 @@ static u64 level2size(unsigned int level)
 	}
 }
 
-static int poison_pte(struct smptrace_ctx *ctx, struct smptrace_map *map)
+int smptrace_arch_poison_pte(struct smptrace_ctx *ctx, struct smptrace_map *map)
 {
 	int64_t remain = map->len;
 	unsigned long va = map->va;
@@ -117,7 +119,7 @@ fail:
 	return ret;
 }
 
-static void restore_pte(struct smptrace_ctx *ctx, struct smptrace_map *map)
+void smptrace_arch_restore_pte(struct smptrace_ctx *ctx, struct smptrace_map *map)
 {
 	unsigned long va = map->va;
 	int64_t remain = map->len;
@@ -133,7 +135,7 @@ static void restore_pte(struct smptrace_ctx *ctx, struct smptrace_map *map)
 			continue;
 		}
 
-		orig = __find_pte(map, va);
+		orig = smptrace_find_pte(map, va);
 		if (!orig) {
 			pr_err("could not find saved PTE for va=0x%lx\n", va);
 			remain -= level2size(level);
@@ -225,34 +227,34 @@ static int emulate_pf_instruction(struct smptrace_ctx *ctx,
 
 	switch (mmio) {
 	case INSN_MMIO_WRITE:
-		emulate_write(ctx, map, addr, len, (u8 *)data);
+		smptrace_emulate_write(ctx, map, addr, len, (u8 *)data);
 		break;
 	case INSN_MMIO_WRITE_IMM:
 		BUG_ON(len > 4);
-		emulate_write(ctx, map, addr, len, (u8 *)insn.immediate1.bytes);
+		smptrace_emulate_write(ctx, map, addr, len, (u8 *)insn.immediate1.bytes);
 		break;
 	case INSN_MMIO_READ:
 		if (len == 4)
 			*data = 0;
-		emulate_read(ctx, map, addr, len, (u8 *)data);
+		smptrace_emulate_read(ctx, map, addr, len, (u8 *)data);
 		break;
 	case INSN_MMIO_READ_ZERO_EXTEND:
 		memset(data, 0, insn.opnd_bytes);
-		emulate_read(ctx, map, addr, len, (u8 *)data);
+		smptrace_emulate_read(ctx, map, addr, len, (u8 *)data);
 		break;
 	case INSN_MMIO_READ_SIGN_EXTEND:
         /* Sign extend based on operand size */
 		if (len == 1) {
 			u8 val;
-			emulate_read(ctx, map, addr, len, &val);
+			smptrace_emulate_read(ctx, map, addr, len, &val);
 			sign_byte = (val & 0x80) ? 0xff : 0x00;
 		} else {
 			u16 val;
-			emulate_read(ctx, map, addr, len, (u8 *)&val);
+			smptrace_emulate_read(ctx, map, addr, len, (u8 *)&val);
 			sign_byte = (val & 0x8000) ? 0xff : 0x00;
 		}
 		memset(data, sign_byte, insn.opnd_bytes);
-		emulate_read(ctx, map, addr, len, (u8 *)data);
+		smptrace_emulate_read(ctx, map, addr, len, (u8 *)data);
 		break;
 	case INSN_MMIO_MOVS:
 		pr_warn_ratelimited("unhandled MOVS instruction ip=0x%lx", regs->ip);
@@ -309,7 +311,7 @@ static int __enter_badarea(struct kprobe *kp, struct pt_regs *regs)
 	return 0;
 }
 
-static int smptrace_activate(struct smptrace_ctx *ctx)
+int smptrace_arch_activate(struct smptrace_ctx *ctx)
 {
 	ctx->shadow_va = ioremap(ctx->pa, ctx->len);
 	if (!ctx->shadow_va) {
@@ -324,12 +326,12 @@ static int smptrace_activate(struct smptrace_ctx *ctx)
 		.symbol_name = "bad_area_nosemaphore",
 	};
 	ctx->iounmap_kp = (struct kprobe){
-		.pre_handler = __enter_iounmap,
+		.pre_handler = smptrace_enter_iounmap,
 		.symbol_name = "iounmap",
 	};
 	ctx->ioremap_krp = (struct kretprobe){
-		.entry_handler  = __enter_ioremap,
-		.handler        = __exit_ioremap,
+		.entry_handler  = smptrace_enter_ioremap,
+		.handler        = smptrace_exit_ioremap,
 		.maxactive      = 32,
 		.data_size      = sizeof(struct ioremap_args),
 		.kp.symbol_name = "ioremap",

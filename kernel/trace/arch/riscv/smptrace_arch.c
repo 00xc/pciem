@@ -4,6 +4,7 @@
  *  Copyright (C) 2026  Joel Bueno <buenocalvachejoel@gmail.com>
  */
 #include <asm/csr.h>
+#include "trace/smptrace_internal.h"
 
 #define SMPTRACE_RISCV_LEVEL_PTE  0
 #define SMPTRACE_RISCV_LEVEL_PMD  1
@@ -101,7 +102,7 @@ static unsigned long riscv_level2size(unsigned int level)
 	}
 }
 
-static int poison_pte(struct smptrace_ctx *ctx, struct smptrace_map *map)
+int smptrace_arch_poison_pte(struct smptrace_ctx *ctx, struct smptrace_map *map)
 {
 	unsigned long va = map->va;
 	int64_t remain = map->len;
@@ -161,7 +162,7 @@ fail:
 	return ret;
 }
 
-static void restore_pte(struct smptrace_ctx *ctx, struct smptrace_map *map)
+void smptrace_arch_restore_pte(struct smptrace_ctx *ctx, struct smptrace_map *map)
 {
 	unsigned long va = map->va;
 	int64_t remain = map->len;
@@ -180,7 +181,7 @@ static void restore_pte(struct smptrace_ctx *ctx, struct smptrace_map *map)
 
 		step = riscv_level2size(level);
 
-		orig = __find_pte(map, va);
+		orig = smptrace_find_pte(map, va);
 		if (!orig) {
 			pr_err("could not find saved PTE for va=0x%lx\n", va);
 			remain -= step;
@@ -429,10 +430,10 @@ static int emulate_riscv_fault(struct smptrace_ctx *ctx,
 
 	if (ls.is_store) {
 		unsigned long src = riscv_get_reg(regs, ls.rs2);
-		emulate_write(ctx, map, fault_va, ls.size, (u8 *)&src);
+		smptrace_emulate_write(ctx, map, fault_va, ls.size, (u8 *)&src);
 	} else {
 		val = 0;
-		emulate_read(ctx, map, fault_va, ls.size, (u8 *)&val);
+		smptrace_emulate_read(ctx, map, fault_va, ls.size, (u8 *)&val);
 
 		if (ls.rd != 0) {
 			if (ls.sign_extend) {
@@ -500,7 +501,7 @@ static int __enter_riscv_handle_page_fault(struct kprobe *kp,
 	return 0;
 }
 
-static int smptrace_activate(struct smptrace_ctx *ctx)
+int smptrace_arch_activate(struct smptrace_ctx *ctx)
 {
 	// Maybe we could do w/o SATP but it should point to kernel page tables on this context
 	ctx->riscv_kernel_satp = csr_read(CSR_SATP);
@@ -521,12 +522,12 @@ static int smptrace_activate(struct smptrace_ctx *ctx)
 		.symbol_name = "handle_page_fault",
 	};
 	ctx->iounmap_kp = (struct kprobe){
-		.pre_handler = __enter_iounmap,
+		.pre_handler = smptrace_enter_iounmap,
 		.symbol_name = "iounmap",
 	};
 	ctx->ioremap_krp = (struct kretprobe){
-		.entry_handler  = __enter_ioremap,
-		.handler        = __exit_ioremap,
+		.entry_handler  = smptrace_enter_ioremap,
+		.handler        = smptrace_exit_ioremap,
 		.maxactive      = 32,
 		.data_size      = sizeof(struct ioremap_args),
 		.kp.symbol_name = "ioremap_prot",

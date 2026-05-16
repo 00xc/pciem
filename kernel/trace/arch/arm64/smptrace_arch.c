@@ -4,10 +4,12 @@
  *  Copyright (C) 2026  Joel Bueno <buenocalvachejoel@gmail.com>
  */
 
+#include <linux/kprobes.h>
 #include <asm/traps.h>
 #include <asm/pgtable-hwdef.h>
 #include <asm/sysreg.h>
 #include <asm/esr.h>
+#include "trace/smptrace_internal.h"
 
 #define SMPTRACE_ARM64_LEVEL_PTE  0
 #define SMPTRACE_ARM64_LEVEL_PMD  1
@@ -102,7 +104,7 @@ static unsigned long arm64_level2size(unsigned int level)
  * This also overcomes the limitation of certain unexported functions (That
  * would probably make this much more cleaner...) erroring out on modpost.
  */
-static int poison_pte(struct smptrace_ctx *ctx, struct smptrace_map *map)
+int smptrace_arch_poison_pte(struct smptrace_ctx *ctx, struct smptrace_map *map)
 {
 	unsigned long va = map->va;
 	int64_t remain = map->len;
@@ -165,7 +167,7 @@ fail:
 /*
  * Restore the PTEs corresponding to the given VA range.
  */
-static void restore_pte(struct smptrace_ctx *ctx, struct smptrace_map *map)
+void smptrace_arch_restore_pte(struct smptrace_ctx *ctx, struct smptrace_map *map)
 {
 	unsigned long va = map->va;
 	int64_t remain = map->len;
@@ -184,7 +186,7 @@ static void restore_pte(struct smptrace_ctx *ctx, struct smptrace_map *map)
 
 		step = arm64_level2size(level);
 
-		orig = __find_pte(map, va);
+		orig = smptrace_find_pte(map, va);
 		if (!orig) {
 			pr_err("could not find saved PTE for va=0x%lx\n", va);
 			remain -= step;
@@ -376,10 +378,10 @@ static int emulate_arm64_fault(struct smptrace_ctx *ctx,
 
 	if (is_store) {
 		val = (srt == 31) ? 0ULL : regs->regs[srt];
-		emulate_write(ctx, map, addr, size, (u8 *)&val);
+		smptrace_emulate_write(ctx, map, addr, size, (u8 *)&val);
 	} else {
 		val = 0;
-		emulate_read(ctx, map, addr, size, (u8 *)&val);
+		smptrace_emulate_read(ctx, map, addr, size, (u8 *)&val);
 
 		if (srt != 31) {
 			if (sse) {
@@ -451,7 +453,7 @@ static int __enter_do_kernel_fault(struct kprobe *kp, struct pt_regs *regs)
 	return 0;
 }
 
-static int smptrace_activate(struct smptrace_ctx *ctx)
+int smptrace_arch_activate(struct smptrace_ctx *ctx)
 {
 	ctx->shadow_va = ioremap(ctx->pa, ctx->len);
 	if (!ctx->shadow_va) {
@@ -465,12 +467,12 @@ static int smptrace_activate(struct smptrace_ctx *ctx)
 		.symbol_name = "__do_kernel_fault",
 	};
 	ctx->iounmap_kp = (struct kprobe){
-		.pre_handler = __enter_iounmap,
+		.pre_handler = smptrace_enter_iounmap,
 		.symbol_name = "iounmap",
 	};
 	ctx->ioremap_krp = (struct kretprobe){
-		.entry_handler  = __enter_ioremap,
-		.handler        = __exit_ioremap,
+		.entry_handler  = smptrace_enter_ioremap,
+		.handler        = smptrace_exit_ioremap,
 		.maxactive      = 32,
 		.data_size      = sizeof(struct ioremap_args),
 		.kp.symbol_name = "ioremap_prot",
