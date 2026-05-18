@@ -84,6 +84,8 @@ struct pciem_userspace_state
 
     /* BAR read/write trackers */
     struct pciem_tracer tracers[PCIEM_MAX_FUNCTIONS][PCI_STD_NUM_BARS];
+
+    struct kref refcnt;
 };
 
 struct pciem_pending_request
@@ -118,6 +120,7 @@ static int pciem_device_release(struct inode *inode, struct file *file);
 static ssize_t pciem_device_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos);
 static long pciem_device_ioctl(struct file *file, unsigned int cmd, unsigned long arg);
 static int pciem_device_mmap(struct file *file, struct vm_area_struct *vma);
+static int pciem_instance_release(struct inode *inode, struct file *file);
 
 const struct file_operations pciem_device_fops = {
     .owner = THIS_MODULE,
@@ -185,6 +188,7 @@ static int pciem_instance_mmap(struct file *file, struct vm_area_struct *vma)
 static const struct file_operations pciem_instance_fops = {
     .owner = THIS_MODULE,
     .mmap = pciem_instance_mmap,
+    .release = pciem_instance_release,
 };
 
 static struct pciem_pending_request *find_pending_request(struct pciem_userspace_state *us, uint64_t seq)
@@ -285,6 +289,8 @@ struct pciem_userspace_state *pciem_userspace_create(void)
         return ERR_PTR(ret);
     }
 
+    kref_init(&us->refcnt);
+
     memset(&us->slot, 0, sizeof(us->slot));
     spin_lock_init(&us->slot.slot_lock);
     us->slot.num_funcs = 0;
@@ -305,8 +311,9 @@ struct pciem_userspace_state *pciem_userspace_create(void)
     return us;
 }
 
-static void pciem_userspace_destroy(struct pciem_userspace_state *us)
+static void pciem_userspace_destroy(struct kref *refcnt)
 {
+    struct pciem_userspace_state *us = container_of(refcnt, struct pciem_userspace_state, refcnt);
     struct pciem_pending_request *req;
     struct hlist_node *tmp;
     int i, f;
@@ -341,6 +348,16 @@ static void pciem_userspace_destroy(struct pciem_userspace_state *us)
     }
 
     kfree(us);
+}
+
+static int pciem_instance_release(struct inode *inode, struct file *file)
+{
+    struct pciem_userspace_state *us = file->private_data;
+
+    if (us)
+        kref_put(&us->refcnt, pciem_userspace_destroy);
+
+    return 0;
 }
 
 static bool pciem_shared_ring_push(struct pciem_userspace_state *us,
@@ -460,9 +477,8 @@ static int pciem_device_release(struct inode *inode, struct file *file)
 
     pr_info("Userspace device fd closed\n");
 
-    if (us) {
-        pciem_userspace_destroy(us);
-    }
+    if (us)
+        kref_put(&us->refcnt, pciem_userspace_destroy);
 
     return 0;
 }
@@ -786,6 +802,10 @@ static long pciem_ioctl_register(struct pciem_userspace_state *us)
 
     pr_info("Userspace device registered successfully, returning FD %d\n",
             fd);
+
+    /* Make sure @us stays alive while the device fd is alive even if the
+     * main pciem fd is closed */
+    kref_get(&us->refcnt);
 
     return fd;
 }
