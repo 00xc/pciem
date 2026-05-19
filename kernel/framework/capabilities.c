@@ -727,7 +727,7 @@ static bool handle_msi_write(struct pciem_cap_entry *cap, u8 *storage,
     if (offset == PCI_MSI_ADDRESS_LO && size == 4)
     {
         st->address_lo = value;
-        put_unaligned_le32(value, storage + offset);
+        put_unaligned_le32(st->address_lo, storage + offset);
         pr_info("MSI Address Lo written: 0x%08x\n", value);
         return true;
     }
@@ -736,7 +736,7 @@ static bool handle_msi_write(struct pciem_cap_entry *cap, u8 *storage,
         if (offset == PCI_MSI_ADDRESS_HI && size == 4)
         {
             st->address_hi = value;
-            put_unaligned_le32(value, storage + offset);
+            put_unaligned_le32(st->address_hi, storage + offset);
             pr_info("MSI Address Hi written: 0x%08x\n", value);
             return true;
         }
@@ -750,7 +750,7 @@ static bool handle_msi_write(struct pciem_cap_entry *cap, u8 *storage,
         else if (offset == PCI_MSI_MASK_64 && size == 4)
         {
             st->mask_bits = value;
-            put_unaligned_le32(value, storage + offset);
+            put_unaligned_le32(st->mask_bits, storage + offset);
             pr_info("MSI Mask bits written: 0x%08x\n", value);
             return true;
         }
@@ -767,7 +767,7 @@ static bool handle_msi_write(struct pciem_cap_entry *cap, u8 *storage,
         else if (offset == PCI_MSI_MASK_32 && size == 4)
         {
             st->mask_bits = value;
-            put_unaligned_le32(value, storage + offset);
+            put_unaligned_le32(st->mask_bits, storage + offset);
             pr_info("MSI Mask bits written: 0x%08x\n", value);
             return true;
         }
