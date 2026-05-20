@@ -703,18 +703,31 @@ bool pciem_handle_cap_read(struct pciem_root_complex *v, int where, int size, u3
     return false;
 }
 
-static bool handle_msi_write(struct pciem_cap_entry *cap, u32 offset, u32 size, u32 value)
+/*
+ * Write the post-masked register value back into the cap's byte storage
+ * at `storage+offset` (v->cfg for standard caps, v->ext_cfg for extended
+ * ones). Block reads of /sys/.../config — used by lspci and any
+ * userspace that pread()s a chunk of config space — index the byte view
+ * directly when the per-register cap-read handler doesn't match the
+ * exact (offset,size) pair the caller used. Without this write-back the
+ * byte view stays at its boot-time value even after the kernel has
+ * updated the typed cap state.
+ */
+static bool handle_msi_write(struct pciem_cap_entry *cap, u8 *storage,
+                              u32 offset, u32 size, u32 value)
 {
     struct pciem_msi_state *st = &cap->state.msi_state;
 
     if (offset == PCI_MSI_FLAGS && size == 2) {
         st->control = value & 0xffff;
+        put_unaligned_le16(st->control, storage + offset);
         pr_info("MSI Control written: 0x%04x (Enable: %d)\n", value, !!(value & PCI_MSI_FLAGS_ENABLE));
         return true;
     }
     if (offset == PCI_MSI_ADDRESS_LO && size == 4)
     {
         st->address_lo = value;
+        put_unaligned_le32(st->address_lo, storage + offset);
         pr_info("MSI Address Lo written: 0x%08x\n", value);
         return true;
     }
@@ -723,18 +736,21 @@ static bool handle_msi_write(struct pciem_cap_entry *cap, u32 offset, u32 size, 
         if (offset == PCI_MSI_ADDRESS_HI && size == 4)
         {
             st->address_hi = value;
+            put_unaligned_le32(st->address_hi, storage + offset);
             pr_info("MSI Address Hi written: 0x%08x\n", value);
             return true;
         }
         else if (offset == PCI_MSI_DATA_64 && size == 2)
         {
             st->data = value & 0xFFFF;
+            put_unaligned_le16(st->data, storage + offset);
             pr_info("MSI Data written: 0x%04x\n", value);
             return true;
         }
         else if (offset == PCI_MSI_MASK_64 && size == 4)
         {
             st->mask_bits = value;
+            put_unaligned_le32(st->mask_bits, storage + offset);
             pr_info("MSI Mask bits written: 0x%08x\n", value);
             return true;
         }
@@ -744,12 +760,14 @@ static bool handle_msi_write(struct pciem_cap_entry *cap, u32 offset, u32 size, 
         if (offset == PCI_MSI_DATA_32 && size == 2)
         {
             st->data = value & 0xFFFF;
+            put_unaligned_le16(st->data, storage + offset);
             pr_info("MSI Data written: 0x%04x\n", value);
             return true;
         }
         else if (offset == PCI_MSI_MASK_32 && size == 4)
         {
             st->mask_bits = value;
+            put_unaligned_le32(st->mask_bits, storage + offset);
             pr_info("MSI Mask bits written: 0x%08x\n", value);
             return true;
         }
@@ -757,13 +775,15 @@ static bool handle_msi_write(struct pciem_cap_entry *cap, u32 offset, u32 size, 
     return false;
 }
 
-static bool handle_msix_write(struct pciem_cap_entry *cap, u32 offset, u32 size, u32 value)
+static bool handle_msix_write(struct pciem_cap_entry *cap, u8 *storage,
+                               u32 offset, u32 size, u32 value)
 {
     struct pciem_msix_state *st = &cap->state.msix_state;
 
     if (offset == PCI_MSIX_FLAGS && size == 2)
     {
         st->control = (st->control & 0x07FF) | (value & 0xC000);
+        put_unaligned_le16(st->control, storage + offset);
         pr_info("MSI-X Control written: 0x%04x (Enable: %d)\n", value, !!(value & PCI_MSIX_FLAGS_ENABLE));
         return true;
     }
@@ -771,13 +791,15 @@ static bool handle_msix_write(struct pciem_cap_entry *cap, u32 offset, u32 size,
     return false;
 }
 
-static bool handle_pm_write(struct pciem_cap_entry *cap, u32 offset, u32 size, u32 value)
+static bool handle_pm_write(struct pciem_cap_entry *cap, u8 *storage,
+                             u32 offset, u32 size, u32 value)
 {
     struct pciem_pm_state *st = &cap->state.pm_state;
 
     if (offset == PCI_PM_CTRL && size == 2)
     {
         st->control = value & (PCI_PM_CTRL_STATE_MASK | PCI_PM_CTRL_PME_ENABLE | PCI_PM_CTRL_PME_STATUS);
+        put_unaligned_le16(st->control, storage + offset);
         pr_info("PM Control written: 0x%04x (Power State: D%d)\n", value, value & 0x3);
         return true;
     }
@@ -785,13 +807,15 @@ static bool handle_pm_write(struct pciem_cap_entry *cap, u32 offset, u32 size, u
     return false;
 }
 
-static bool handle_pasid_write(struct pciem_cap_entry *cap, u32 offset, u32 size, u32 value)
+static bool handle_pasid_write(struct pciem_cap_entry *cap, u8 *storage,
+                                u32 offset, u32 size, u32 value)
 {
     struct pciem_pasid_state *st = &cap->state.pasid_state;
 
     if (offset == PCI_PASID_CTRL && size == 2)
     {
         st->control = value & (PCI_PASID_CTRL_ENABLE | PCI_PASID_CTRL_EXEC | PCI_PASID_CTRL_PRIV);
+        put_unaligned_le16(st->control, storage + offset);
         if (value & PCI_PASID_CTRL_ENABLE)
         {
             pr_info("PASID Enabled\n");
@@ -819,20 +843,25 @@ bool pciem_handle_cap_write(struct pciem_root_complex *v, int where, int size, u
         struct pciem_cap_entry *cap = &mgr->caps[i];
         int cap_base = cap->is_extended ? (int)cap->ext_offset : (int)cap->offset;
         int cap_offset = where - cap_base;
+        u8 *cap_storage;
 
         if (where < cap_base || where >= cap_base + cap->size)
             continue;
 
+        cap_storage = cap->is_extended
+                     ? &v->ext_cfg[cap_base - PCI_CFG_SPACE_SIZE]
+                     : &v->cfg[cap_base];
+
         switch (cap->type)
         {
         case PCIEM_CAP_MSI:
-            return handle_msi_write(cap, cap_offset, size, value);
+            return handle_msi_write(cap, cap_storage, cap_offset, size, value);
         case PCIEM_CAP_MSIX:
-            return handle_msix_write(cap, cap_offset, size, value);
+            return handle_msix_write(cap, cap_storage, cap_offset, size, value);
         case PCIEM_CAP_PM:
-            return handle_pm_write(cap, cap_offset, size, value);
+            return handle_pm_write(cap, cap_storage, cap_offset, size, value);
         case PCIEM_CAP_PASID:
-            return handle_pasid_write(cap, cap_offset, size, value);
+            return handle_pasid_write(cap, cap_storage, cap_offset, size, value);
         default:
             return true;
         }
