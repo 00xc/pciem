@@ -9,7 +9,8 @@ pciem-objs := framework/pciem.o \
               framework/userspace.o \
               framework/pool.o
 
-pciem-objs += trace/smptrace.o
+pciem-objs += trace/smptrace.o \
+              trace/arch/$(ARCH)/smptrace_arch.o
 
 ifeq ($(ARCH),x86)
 pciem-objs += trace/arch/x86/lib/insn.o \

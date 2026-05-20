@@ -51,6 +51,8 @@ struct smptrace_map {
 	unsigned long va;
 	unsigned long len;
 	resource_size_t pa;
+	/* Un-poisoned PTEs */
+	struct list_head ptes;
 };
 
 struct smptrace_ctx {
@@ -80,8 +82,6 @@ struct smptrace_ctx {
 	/* Protects structural modifications to the lists */
 	spinlock_t lock;
 
-	/* Un-poisoned PTEs */
-	struct list_head ptes;
 	/* Active mapped VA regions */
 	struct list_head maps;
 

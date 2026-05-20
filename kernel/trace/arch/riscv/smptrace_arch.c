@@ -4,6 +4,7 @@
  *  Copyright (C) 2026  Joel Bueno <buenocalvachejoel@gmail.com>
  */
 #include <asm/csr.h>
+#include "trace/smptrace_internal.h"
 
 #define SMPTRACE_RISCV_LEVEL_PTE  0
 #define SMPTRACE_RISCV_LEVEL_PMD  1
@@ -101,16 +102,12 @@ static unsigned long riscv_level2size(unsigned int level)
 	}
 }
 
-static int poison_pte(struct smptrace_ctx *ctx, unsigned long va,
-                      unsigned int len)
+int smptrace_arch_poison_pte(struct smptrace_ctx *ctx, struct smptrace_map *map)
 {
-	int64_t remain = len;
+	unsigned long va = map->va;
+	int64_t remain = map->len;
 	struct smptrace_pte *orig, *tmp;
-	struct list_head local_ptes;
-	unsigned long flags;
 	int ret;
-
-	INIT_LIST_HEAD(&local_ptes);
 
 	while (remain > 0) {
 		unsigned int level;
@@ -150,18 +147,14 @@ static int poison_pte(struct smptrace_ctx *ctx, unsigned long va,
 
 		remain -= riscv_level2size(level);
 		va     += riscv_level2size(level);
-		list_add_tail(&orig->list, &local_ptes);
+		list_add_tail(&orig->list, &map->ptes);
 	}
-
-	spin_lock_irqsave(&ctx->lock, flags);
-	list_splice_tail(&local_ptes, &ctx->ptes);
-	spin_unlock_irqrestore(&ctx->lock, flags);
 
 	on_each_cpu(riscv_smptrace_sfence, NULL, 1);
 	return 0;
 
 fail:
-	list_for_each_entry_safe(orig, tmp, &local_ptes, list) {
+	list_for_each_entry_safe(orig, tmp, &map->ptes, list) {
 		list_del(&orig->list);
 		kfree(orig);
 	}
@@ -169,11 +162,10 @@ fail:
 	return ret;
 }
 
-static void restore_pte(struct smptrace_ctx *ctx, unsigned long va,
-                        unsigned int len)
+void smptrace_arch_restore_pte(struct smptrace_ctx *ctx, struct smptrace_map *map)
 {
-	int64_t remain = len;
-	unsigned long flags;
+	unsigned long va = map->va;
+	int64_t remain = map->len;
 
 	while (remain > 0) {
 		unsigned int level;
@@ -189,18 +181,15 @@ static void restore_pte(struct smptrace_ctx *ctx, unsigned long va,
 
 		step = riscv_level2size(level);
 
-		spin_lock_irqsave(&ctx->lock, flags);
-		orig = __find_pte(ctx, va);
-		if (orig)
-			list_del(&orig->list);
-		spin_unlock_irqrestore(&ctx->lock, flags);
-
+		orig = smptrace_find_pte(map, va);
 		if (!orig) {
 			pr_err("could not find saved PTE for va=0x%lx\n", va);
 			remain -= step;
 			va     += step;
 			continue;
 		}
+
+		list_del(&orig->list);
 
 		if (orig->level != level)
 			pr_warn("PTE level mismatch for va=0x%lx (saved=%u walk=%u)",
@@ -441,10 +430,10 @@ static int emulate_riscv_fault(struct smptrace_ctx *ctx,
 
 	if (ls.is_store) {
 		unsigned long src = riscv_get_reg(regs, ls.rs2);
-		emulate_write(ctx, map, fault_va, ls.size, (u8 *)&src);
+		smptrace_emulate_write(ctx, map, fault_va, ls.size, (u8 *)&src);
 	} else {
 		val = 0;
-		emulate_read(ctx, map, fault_va, ls.size, (u8 *)&val);
+		smptrace_emulate_read(ctx, map, fault_va, ls.size, (u8 *)&val);
 
 		if (ls.rd != 0) {
 			if (ls.sign_extend) {
@@ -512,7 +501,7 @@ static int __enter_riscv_handle_page_fault(struct kprobe *kp,
 	return 0;
 }
 
-static int smptrace_activate(struct smptrace_ctx *ctx)
+int smptrace_arch_activate(struct smptrace_ctx *ctx)
 {
 	// Maybe we could do w/o SATP but it should point to kernel page tables on this context
 	ctx->riscv_kernel_satp = csr_read(CSR_SATP);
@@ -533,12 +522,12 @@ static int smptrace_activate(struct smptrace_ctx *ctx)
 		.symbol_name = "handle_page_fault",
 	};
 	ctx->iounmap_kp = (struct kprobe){
-		.pre_handler = __enter_iounmap,
+		.pre_handler = smptrace_enter_iounmap,
 		.symbol_name = "iounmap",
 	};
 	ctx->ioremap_krp = (struct kretprobe){
-		.entry_handler  = __enter_ioremap,
-		.handler        = __exit_ioremap,
+		.entry_handler  = smptrace_enter_ioremap,
+		.handler        = smptrace_exit_ioremap,
 		.maxactive      = 32,
 		.data_size      = sizeof(struct ioremap_args),
 		.kp.symbol_name = "ioremap_prot",

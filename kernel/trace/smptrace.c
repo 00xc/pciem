@@ -45,6 +45,7 @@
 #include <asm/io.h>
 #include <asm/tlbflush.h>
 #include "trace/smptrace.h"
+#include "trace/smptrace_internal.h"
 
 static void __fill_io_notif(struct smptrace_io *io, const u8 *data, u32 size,
                             u64 off)
@@ -69,7 +70,7 @@ static void __fill_io_notif(struct smptrace_io *io, const u8 *data, u32 size,
 	}
 }
 
-static void emulate_read(struct smptrace_ctx *ctx, struct smptrace_map *map,
+void smptrace_emulate_read(struct smptrace_ctx *ctx, struct smptrace_map *map,
                          u64 addr, u32 size, u8 *dst)
 {
 	u64 off;
@@ -85,7 +86,7 @@ static void emulate_read(struct smptrace_ctx *ctx, struct smptrace_map *map,
 	}
 }
 
-static void emulate_write(struct smptrace_ctx *ctx, struct smptrace_map *map,
+void smptrace_emulate_write(struct smptrace_ctx *ctx, struct smptrace_map *map,
                           u64 addr, u32 size, const u8 *src)
 {
 	u64 off;
@@ -105,12 +106,7 @@ static void emulate_write(struct smptrace_ctx *ctx, struct smptrace_map *map,
 	}
 }
 
-struct ioremap_args {
-	resource_size_t pa;
-	unsigned long len;
-};
-
-static int __enter_ioremap(struct kretprobe_instance *ri, struct pt_regs *regs)
+int smptrace_enter_ioremap(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
 	struct ioremap_args *args = (struct ioremap_args *)ri->data;
 
@@ -119,12 +115,7 @@ static int __enter_ioremap(struct kretprobe_instance *ri, struct pt_regs *regs)
 	return 0;
 }
 
-static int poison_pte(struct smptrace_ctx *ctx, unsigned long va,
-                      unsigned int len);
-static void restore_pte(struct smptrace_ctx *ctx, unsigned long va,
-                        unsigned int len);
-
-static int __exit_ioremap(struct kretprobe_instance *ri, struct pt_regs *regs)
+int smptrace_exit_ioremap(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
 	struct kretprobe *rp = get_kretprobe(ri);
 	struct smptrace_ctx *ctx = container_of(rp, struct smptrace_ctx,
@@ -144,18 +135,12 @@ static int __exit_ioremap(struct kretprobe_instance *ri, struct pt_regs *regs)
 	map->va  = va;
 	map->len = args->len;
 	map->pa  = args->pa;
+	INIT_LIST_HEAD(&map->ptes);
 
 	pr_info("poisoning VA=0x%lx:%lx (PA=0x%llx:%lx)",
 	        va, args->len, (unsigned long long)ctx->pa, ctx->len);
 
-	spin_lock_irqsave(&ctx->lock, flags);
-	list_add_tail(&map->list, &ctx->maps);
-	spin_unlock_irqrestore(&ctx->lock, flags);
-
-	if (poison_pte(ctx, va, args->len)) {
-		spin_lock_irqsave(&ctx->lock, flags);
-		list_del(&map->list);
-		spin_unlock_irqrestore(&ctx->lock, flags);
+	if (smptrace_arch_poison_pte(ctx, map)) {
 		kfree(map);
 
 		regs_set_return_value(regs, 0);
@@ -163,12 +148,16 @@ static int __exit_ioremap(struct kretprobe_instance *ri, struct pt_regs *regs)
 
 		pr_warn("failed to poison VA=0x%lx:%lx (PA=0x%llx:%lx)",
 		        va, args->len, args->pa, args->len);
+	} else {
+		spin_lock_irqsave(&ctx->lock, flags);
+		list_add_tail(&map->list, &ctx->maps);
+		spin_unlock_irqrestore(&ctx->lock, flags);
 	}
 
 	return 0;
 }
 
-static int __enter_iounmap(struct kprobe *kp, struct pt_regs *regs)
+int smptrace_enter_iounmap(struct kprobe *kp, struct pt_regs *regs)
 {
 	struct smptrace_ctx *ctx = container_of(kp, struct smptrace_ctx,
 	                                        iounmap_kp);
@@ -191,25 +180,12 @@ static int __enter_iounmap(struct kprobe *kp, struct pt_regs *regs)
 
 	pr_info("restoring VA=0x%lx (PA=0x%llx)", found->va,
 	        (unsigned long long)found->pa);
-	restore_pte(ctx, found->va, found->len);
+	smptrace_arch_restore_pte(ctx, found);
 	kfree(found);
 	return 0;
 }
 
-static struct smptrace_pte *__find_pte(struct smptrace_ctx *ctx, unsigned long va)
-{
-	struct smptrace_pte *tmp;
-
-	list_for_each_entry(tmp, &ctx->ptes, list) {
-		if (tmp->va == va)
-			return tmp;
-	}
-	return NULL;
-}
-
-static void __used smptrace_ret_gadget(void) {}
-
-static int smptrace_register_probes(struct smptrace_ctx *ctx)
+int smptrace_register_probes(struct smptrace_ctx *ctx)
 {
 	int ret;
 
@@ -246,32 +222,10 @@ fail_badarea:
 	return ret;
 }
 
-/*
- * Each backend must provide:
- *   static int  poison_pte(struct smptrace_ctx *, unsigned long va, unsigned int len);
- *   static void restore_pte(struct smptrace_ctx *, unsigned long va, unsigned int len);
- *   static int  smptrace_activate(struct smptrace_ctx *);
- *
- * Backends may freely call emulate_read(), emulate_write(), __find_pte(),
- * smptrace_ret_gadget(), smptrace_register_probes(), __enter_ioremap(),
- * __exit_ioremap(), and __enter_iounmap().
- */
-
-#if defined(CONFIG_X86)
-#include "arch/x86/smptrace_arch.c"
-#elif defined(CONFIG_ARM64)
-#include "arch/arm64/smptrace_arch.c"
-#elif defined(CONFIG_RISCV)
-#include "arch/riscv/smptrace_arch.c"
-#else
-#error "smptrace: unsupported architecture"
-#endif
-
 int smptrace_init(struct smptrace_ctx *ctx)
 {
 	int ret;
 
-	INIT_LIST_HEAD(&ctx->ptes);
 	INIT_LIST_HEAD(&ctx->maps);
 	spin_lock_init(&ctx->lock);
 
@@ -279,7 +233,7 @@ int smptrace_init(struct smptrace_ctx *ctx)
 	if (!ctx->in_pf)
 		return -ENOMEM;
 
-	ret = smptrace_activate(ctx);
+	ret = smptrace_arch_activate(ctx);
 	if (ret) {
 		free_percpu(ctx->in_pf);
 		return ret;
@@ -306,7 +260,7 @@ static void smptrace_deactivate(struct smptrace_ctx *ctx)
 		list_del(&map->list);
 		spin_unlock_irqrestore(&ctx->lock, flags);
 
-		restore_pte(ctx, map->va, map->len);
+		smptrace_arch_restore_pte(ctx, map);
 		kfree(map);
 
 		spin_lock_irqsave(&ctx->lock, flags);
