@@ -232,11 +232,6 @@ static void pciem_tracing_destroy(struct pciem_userspace_state *us)
     }
 }
 
-static void pciem_tracing_init(struct pciem_userspace_state *us)
-{
-    memset(&us->tracers, 0, sizeof(us->tracers));
-}
-
 static int pciem_shared_ring_alloc(struct pciem_userspace_state *us)
 {
     struct page *page;
@@ -272,8 +267,6 @@ struct pciem_userspace_state *pciem_userspace_create(void)
     if (!us)
         return ERR_PTR(-ENOMEM);
 
-    pciem_tracing_init(us);
-
     ret = pciem_shared_ring_alloc(us);
     if (ret) {
         kfree(us);
@@ -282,14 +275,9 @@ struct pciem_userspace_state *pciem_userspace_create(void)
 
     kref_init(&us->refcnt);
 
-    memset(&us->slot, 0, sizeof(us->slot));
-    spin_lock_init(&us->slot.slot_lock);
-    us->slot.num_funcs = 0;
-
     atomic_set(&us->registered, PCIEM_UNREGISTERED);
-    atomic_set(&us->event_pending, 0);
 
-    us->eventfd = NULL;
+    spin_lock_init(&us->slot.slot_lock);
     spin_lock_init(&us->eventfd_lock);
 
     pciem_irqfds_init(&us->irqfds);
