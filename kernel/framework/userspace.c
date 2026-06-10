@@ -67,8 +67,6 @@ struct pciem_userspace_state
 {
     struct pciem_slot_state slot;
 
-    struct hlist_head pending_requests[256];
-    spinlock_t pending_lock;
     uint64_t next_seq;
 
     atomic_t registered;
@@ -117,7 +115,6 @@ static bool fd_empty(struct fd fd)
 #endif
 
 static int pciem_device_release(struct inode *inode, struct file *file);
-static ssize_t pciem_device_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos);
 static long pciem_device_ioctl(struct file *file, unsigned int cmd, unsigned long arg);
 static int pciem_device_mmap(struct file *file, struct vm_area_struct *vma);
 static int pciem_instance_release(struct inode *inode, struct file *file);
@@ -125,7 +122,6 @@ static int pciem_instance_release(struct inode *inode, struct file *file);
 const struct file_operations pciem_device_fops = {
     .owner = THIS_MODULE,
     .release = pciem_device_release,
-    .write = pciem_device_write,
     .unlocked_ioctl = pciem_device_ioctl,
     .compat_ioctl = pciem_device_ioctl,
     .mmap = pciem_device_mmap,
@@ -190,20 +186,6 @@ static const struct file_operations pciem_instance_fops = {
     .mmap = pciem_instance_mmap,
     .release = pciem_instance_release,
 };
-
-static struct pciem_pending_request *find_pending_request(struct pciem_userspace_state *us, uint64_t seq)
-{
-    struct pciem_pending_request *req;
-    int hash = (int)(seq % ARRAY_SIZE(us->pending_requests));
-
-    hlist_for_each_entry(req, &us->pending_requests[hash], node)
-    {
-        if (req->seq == seq)
-            return req;
-    }
-
-    return NULL;
-}
 
 static void pciem_irqfd_shutdown(struct pciem_irqfd *irqfd)
 {
@@ -275,7 +257,7 @@ static int pciem_shared_ring_alloc(struct pciem_userspace_state *us)
 struct pciem_userspace_state *pciem_userspace_create(void)
 {
     struct pciem_userspace_state *us;
-    int i, ret;
+    int ret;
 
     us = kzalloc(sizeof(*us), GFP_KERNEL);
     if (!us)
@@ -295,11 +277,6 @@ struct pciem_userspace_state *pciem_userspace_create(void)
     spin_lock_init(&us->slot.slot_lock);
     us->slot.num_funcs = 0;
 
-    for (i = 0; i < ARRAY_SIZE(us->pending_requests); i++)
-        INIT_HLIST_HEAD(&us->pending_requests[i]);
-    spin_lock_init(&us->pending_lock);
-    us->next_seq = 1;
-
     atomic_set(&us->registered, PCIEM_UNREGISTERED);
     atomic_set(&us->event_pending, 0);
 
@@ -314,26 +291,13 @@ struct pciem_userspace_state *pciem_userspace_create(void)
 static void pciem_userspace_destroy(struct kref *refcnt)
 {
     struct pciem_userspace_state *us = container_of(refcnt, struct pciem_userspace_state, refcnt);
-    struct pciem_pending_request *req;
-    struct hlist_node *tmp;
-    int i, f;
+    int f;
 
     if (!us)
         return;
 
     pciem_tracing_destroy(us);
     pciem_irqfds_shutdown(&us->irqfds);
-
-    for (i = 0; i < ARRAY_SIZE(us->pending_requests); i++)
-    {
-        hlist_for_each_entry_safe(req, tmp, &us->pending_requests[i], node)
-        {
-            req->response_status = -ENODEV;
-            complete(&req->done);
-            hlist_del(&req->node);
-            kfree(req);
-        }
-    }
 
     __free_pages(virt_to_page(us->shared_ring), get_order(sizeof(struct pciem_shared_ring)));
 
@@ -481,35 +445,6 @@ static int pciem_device_release(struct inode *inode, struct file *file)
         kref_put(&us->refcnt, pciem_userspace_destroy);
 
     return 0;
-}
-
-static ssize_t pciem_device_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos)
-{
-    struct pciem_userspace_state *us = file->private_data;
-    struct pciem_response response;
-    struct pciem_pending_request *req;
-    unsigned long flags;
-
-    if (count < sizeof(response))
-        return -EINVAL;
-
-    if (copy_from_user(&response, buf, sizeof(response)))
-        return -EFAULT;
-
-    spin_lock_irqsave(&us->pending_lock, flags);
-    req = find_pending_request(us, response.seq);
-    if (req)
-    {
-        req->response_data = response.data;
-        req->response_status = response.status;
-        complete(&req->done);
-    }
-    spin_unlock_irqrestore(&us->pending_lock, flags);
-
-    if (!req)
-        return -EINVAL;
-
-    return sizeof(response);
 }
 
 static int pciem_device_mmap(struct file *file, struct vm_area_struct *vma)
