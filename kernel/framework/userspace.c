@@ -254,6 +254,15 @@ static int pciem_shared_ring_alloc(struct pciem_userspace_state *us)
     return 0;
 }
 
+static void pciem_shared_ring_destroy(struct pciem_userspace_state *us)
+{
+    if (us->shared_ring) {
+        __free_pages(virt_to_page(us->shared_ring),
+                     get_order(sizeof(struct pciem_shared_ring)));
+        us->shared_ring = NULL;
+    }
+}
+
 struct pciem_userspace_state *pciem_userspace_create(void)
 {
     struct pciem_userspace_state *us;
@@ -299,7 +308,7 @@ static void pciem_userspace_destroy(struct kref *refcnt)
     pciem_tracing_destroy(us);
     pciem_irqfds_shutdown(&us->irqfds);
 
-    __free_pages(virt_to_page(us->shared_ring), get_order(sizeof(struct pciem_shared_ring)));
+    pciem_shared_ring_destroy(us);
 
     if (us->eventfd)
         eventfd_ctx_put(us->eventfd);
