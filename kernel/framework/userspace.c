@@ -36,6 +36,7 @@ struct pciem_irqfd
     struct eventfd_ctx *trigger;
     wait_queue_entry_t wait;
     struct work_struct inject_work;
+    struct work_struct shutdown_work;
     struct pciem_userspace_state *us;
     uint32_t vector;
     uint32_t flags;
@@ -48,6 +49,7 @@ struct pciem_irqfd
 
 struct pciem_irqfds {
     spinlock_t lock;
+    struct workqueue_struct *cleanup_wq;
     struct list_head items;
 };
 
@@ -187,35 +189,55 @@ static const struct file_operations pciem_instance_fops = {
     .release = pciem_instance_release,
 };
 
-static void pciem_irqfd_shutdown(struct pciem_irqfd *irqfd)
+static void pciem_irqfd_shutdown_work(struct work_struct *work)
 {
+    struct pciem_irqfd *irqfd = container_of(work, struct pciem_irqfd,
+                                             shutdown_work);
     u64 cnt;
 
-    list_del_init(&irqfd->list);
-
     eventfd_ctx_remove_wait_queue(irqfd->trigger, &irqfd->wait, &cnt);
-
     flush_work(&irqfd->inject_work);
-
     eventfd_ctx_put(irqfd->trigger);
     kfree(irqfd);
 }
 
-static void pciem_irqfds_init(struct pciem_irqfds *irqfds)
+static void pciem_irqfd_shutdown(struct pciem_irqfd *irqfd)
+{
+    struct pciem_irqfds *irqfds = &irqfd->us->irqfds;
+
+    lockdep_assert_held(&irqfds->lock);
+
+    if (!list_empty(&irqfd->list)) {
+        list_del_init(&irqfd->list);
+        queue_work(irqfds->cleanup_wq, &irqfd->shutdown_work);
+    }
+}
+
+static int pciem_irqfds_init(struct pciem_irqfds *irqfds)
 {
     spin_lock_init(&irqfds->lock);
     INIT_LIST_HEAD(&irqfds->items);
+    irqfds->cleanup_wq = alloc_workqueue("pciem-irqfd-cleanup", 0, 0);
+    if (!irqfds->cleanup_wq)
+        return -ENOMEM;
+    return 0;
 }
 
 static void pciem_irqfds_shutdown(struct pciem_irqfds *irqfds)
 {
     struct pciem_irqfd *irqfd, *tmp;
 
-    guard(spinlock_irqsave)(&irqfds->lock);
+    if (!irqfds->cleanup_wq)
+        return;
 
-    list_for_each_entry_safe(irqfd, tmp, &irqfds->items, list) {
-        pciem_irqfd_shutdown(irqfd);
+    scoped_guard(spinlock_irqsave, &irqfds->lock) {
+        list_for_each_entry_safe(irqfd, tmp, &irqfds->items, list) {
+            pciem_irqfd_shutdown(irqfd);
+        }
     }
+
+    destroy_workqueue(irqfds->cleanup_wq);
+    irqfds->cleanup_wq = NULL;
 }
 
 static void pciem_tracing_destroy(struct pciem_userspace_state *us)
@@ -273,6 +295,13 @@ struct pciem_userspace_state *pciem_userspace_create(void)
         return ERR_PTR(ret);
     }
 
+    ret = pciem_irqfds_init(&us->irqfds);
+    if (ret) {
+        pciem_shared_ring_destroy(us);
+        kfree(us);
+        return ERR_PTR(ret);
+    }
+
     kref_init(&us->refcnt);
 
     atomic_set(&us->registered, PCIEM_UNREGISTERED);
@@ -280,7 +309,6 @@ struct pciem_userspace_state *pciem_userspace_create(void)
     spin_lock_init(&us->slot.slot_lock);
     spin_lock_init(&us->eventfd_lock);
 
-    pciem_irqfds_init(&us->irqfds);
 
     return us;
 }
@@ -1039,10 +1067,8 @@ static int pciem_irqfd_wakeup(wait_queue_entry_t *wait, unsigned mode, int sync,
 
     if (flags & EPOLLHUP) {
         guard(spinlock_irqsave)(&irqfds->lock);
-        if (!list_empty(&irqfd->list)) {
-            pr_info("Unregistering IRQ eventfd for vector %u\n", irqfd->vector);
-            pciem_irqfd_shutdown(irqfd);
-        }
+        pr_info("Unregistering IRQ eventfd for vector %u\n", irqfd->vector);
+        pciem_irqfd_shutdown(irqfd);
     }
 
     return 0;
@@ -1106,6 +1132,7 @@ static long pciem_ioctl_set_irqfd(struct pciem_userspace_state *us,
     irqfd->us = us;
     INIT_LIST_HEAD(&irqfd->list);
     INIT_WORK(&irqfd->inject_work, pciem_irqfd_work);
+    INIT_WORK(&irqfd->shutdown_work, pciem_irqfd_shutdown_work);
     init_waitqueue_func_entry(&irqfd->wait, pciem_irqfd_wakeup);
 
     init_poll_funcptr(&pt_helper.pt, pciem_irqfd_ptable_queue_proc);
