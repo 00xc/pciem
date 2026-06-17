@@ -36,6 +36,7 @@ struct pciem_irqfd
     struct eventfd_ctx *trigger;
     wait_queue_entry_t wait;
     struct work_struct inject_work;
+    struct work_struct shutdown_work;
     struct pciem_userspace_state *us;
     uint32_t vector;
     uint32_t flags;
@@ -48,6 +49,7 @@ struct pciem_irqfd
 
 struct pciem_irqfds {
     spinlock_t lock;
+    struct workqueue_struct *cleanup_wq;
     struct list_head items;
 };
 
@@ -67,8 +69,6 @@ struct pciem_userspace_state
 {
     struct pciem_slot_state slot;
 
-    struct hlist_head pending_requests[256];
-    spinlock_t pending_lock;
     uint64_t next_seq;
 
     atomic_t registered;
@@ -117,7 +117,6 @@ static bool fd_empty(struct fd fd)
 #endif
 
 static int pciem_device_release(struct inode *inode, struct file *file);
-static ssize_t pciem_device_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos);
 static long pciem_device_ioctl(struct file *file, unsigned int cmd, unsigned long arg);
 static int pciem_device_mmap(struct file *file, struct vm_area_struct *vma);
 static int pciem_instance_release(struct inode *inode, struct file *file);
@@ -125,7 +124,6 @@ static int pciem_instance_release(struct inode *inode, struct file *file);
 const struct file_operations pciem_device_fops = {
     .owner = THIS_MODULE,
     .release = pciem_device_release,
-    .write = pciem_device_write,
     .unlocked_ioctl = pciem_device_ioctl,
     .compat_ioctl = pciem_device_ioctl,
     .mmap = pciem_device_mmap,
@@ -191,49 +189,55 @@ static const struct file_operations pciem_instance_fops = {
     .release = pciem_instance_release,
 };
 
-static struct pciem_pending_request *find_pending_request(struct pciem_userspace_state *us, uint64_t seq)
+static void pciem_irqfd_shutdown_work(struct work_struct *work)
 {
-    struct pciem_pending_request *req;
-    int hash = (int)(seq % ARRAY_SIZE(us->pending_requests));
-
-    hlist_for_each_entry(req, &us->pending_requests[hash], node)
-    {
-        if (req->seq == seq)
-            return req;
-    }
-
-    return NULL;
-}
-
-static void pciem_irqfd_shutdown(struct pciem_irqfd *irqfd)
-{
+    struct pciem_irqfd *irqfd = container_of(work, struct pciem_irqfd,
+                                             shutdown_work);
     u64 cnt;
 
-    list_del_init(&irqfd->list);
-
     eventfd_ctx_remove_wait_queue(irqfd->trigger, &irqfd->wait, &cnt);
-
     flush_work(&irqfd->inject_work);
-
     eventfd_ctx_put(irqfd->trigger);
     kfree(irqfd);
 }
 
-static void pciem_irqfds_init(struct pciem_irqfds *irqfds)
+static void pciem_irqfd_shutdown(struct pciem_irqfd *irqfd)
+{
+    struct pciem_irqfds *irqfds = &irqfd->us->irqfds;
+
+    lockdep_assert_held(&irqfds->lock);
+
+    if (!list_empty(&irqfd->list)) {
+        list_del_init(&irqfd->list);
+        queue_work(irqfds->cleanup_wq, &irqfd->shutdown_work);
+    }
+}
+
+static int pciem_irqfds_init(struct pciem_irqfds *irqfds)
 {
     spin_lock_init(&irqfds->lock);
     INIT_LIST_HEAD(&irqfds->items);
+    irqfds->cleanup_wq = alloc_workqueue("pciem-irqfd-cleanup", 0, 0);
+    if (!irqfds->cleanup_wq)
+        return -ENOMEM;
+    return 0;
 }
 
 static void pciem_irqfds_shutdown(struct pciem_irqfds *irqfds)
 {
     struct pciem_irqfd *irqfd, *tmp;
 
-    guard(spinlock_irqsave)(&irqfds->lock);
+    if (!irqfds->cleanup_wq)
+        return;
 
-    list_for_each_entry_safe(irqfd, tmp, &irqfds->items, list) {
-        pciem_irqfd_shutdown(irqfd);
+    scoped_guard(spinlock_irqsave, &irqfds->lock) {
+        list_for_each_entry_safe(irqfd, tmp, &irqfds->items, list) {
+            pciem_irqfd_shutdown(irqfd);
+        }
     }
+
+    destroy_workqueue(irqfds->cleanup_wq);
+    irqfds->cleanup_wq = NULL;
 }
 
 static void pciem_tracing_destroy(struct pciem_userspace_state *us)
@@ -248,11 +252,6 @@ static void pciem_tracing_destroy(struct pciem_userspace_state *us)
             }
         }
     }
-}
-
-static void pciem_tracing_init(struct pciem_userspace_state *us)
-{
-    memset(&us->tracers, 0, sizeof(us->tracers));
 }
 
 static int pciem_shared_ring_alloc(struct pciem_userspace_state *us)
@@ -272,16 +271,23 @@ static int pciem_shared_ring_alloc(struct pciem_userspace_state *us)
     return 0;
 }
 
+static void pciem_shared_ring_destroy(struct pciem_userspace_state *us)
+{
+    if (us->shared_ring) {
+        __free_pages(virt_to_page(us->shared_ring),
+                     get_order(sizeof(struct pciem_shared_ring)));
+        us->shared_ring = NULL;
+    }
+}
+
 struct pciem_userspace_state *pciem_userspace_create(void)
 {
     struct pciem_userspace_state *us;
-    int i, ret;
+    int ret;
 
     us = kzalloc(sizeof(*us), GFP_KERNEL);
     if (!us)
         return ERR_PTR(-ENOMEM);
-
-    pciem_tracing_init(us);
 
     ret = pciem_shared_ring_alloc(us);
     if (ret) {
@@ -289,24 +295,20 @@ struct pciem_userspace_state *pciem_userspace_create(void)
         return ERR_PTR(ret);
     }
 
+    ret = pciem_irqfds_init(&us->irqfds);
+    if (ret) {
+        pciem_shared_ring_destroy(us);
+        kfree(us);
+        return ERR_PTR(ret);
+    }
+
     kref_init(&us->refcnt);
 
-    memset(&us->slot, 0, sizeof(us->slot));
-    spin_lock_init(&us->slot.slot_lock);
-    us->slot.num_funcs = 0;
-
-    for (i = 0; i < ARRAY_SIZE(us->pending_requests); i++)
-        INIT_HLIST_HEAD(&us->pending_requests[i]);
-    spin_lock_init(&us->pending_lock);
-    us->next_seq = 1;
-
     atomic_set(&us->registered, PCIEM_UNREGISTERED);
-    atomic_set(&us->event_pending, 0);
 
-    us->eventfd = NULL;
+    spin_lock_init(&us->slot.slot_lock);
     spin_lock_init(&us->eventfd_lock);
 
-    pciem_irqfds_init(&us->irqfds);
 
     return us;
 }
@@ -314,9 +316,7 @@ struct pciem_userspace_state *pciem_userspace_create(void)
 static void pciem_userspace_destroy(struct kref *refcnt)
 {
     struct pciem_userspace_state *us = container_of(refcnt, struct pciem_userspace_state, refcnt);
-    struct pciem_pending_request *req;
-    struct hlist_node *tmp;
-    int i, f;
+    int f;
 
     if (!us)
         return;
@@ -324,18 +324,7 @@ static void pciem_userspace_destroy(struct kref *refcnt)
     pciem_tracing_destroy(us);
     pciem_irqfds_shutdown(&us->irqfds);
 
-    for (i = 0; i < ARRAY_SIZE(us->pending_requests); i++)
-    {
-        hlist_for_each_entry_safe(req, tmp, &us->pending_requests[i], node)
-        {
-            req->response_status = -ENODEV;
-            complete(&req->done);
-            hlist_del(&req->node);
-            kfree(req);
-        }
-    }
-
-    __free_pages(virt_to_page(us->shared_ring), get_order(sizeof(struct pciem_shared_ring)));
+    pciem_shared_ring_destroy(us);
 
     if (us->eventfd)
         eventfd_ctx_put(us->eventfd);
@@ -481,35 +470,6 @@ static int pciem_device_release(struct inode *inode, struct file *file)
         kref_put(&us->refcnt, pciem_userspace_destroy);
 
     return 0;
-}
-
-static ssize_t pciem_device_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos)
-{
-    struct pciem_userspace_state *us = file->private_data;
-    struct pciem_response response;
-    struct pciem_pending_request *req;
-    unsigned long flags;
-
-    if (count < sizeof(response))
-        return -EINVAL;
-
-    if (copy_from_user(&response, buf, sizeof(response)))
-        return -EFAULT;
-
-    spin_lock_irqsave(&us->pending_lock, flags);
-    req = find_pending_request(us, response.seq);
-    if (req)
-    {
-        req->response_data = response.data;
-        req->response_status = response.status;
-        complete(&req->done);
-    }
-    spin_unlock_irqrestore(&us->pending_lock, flags);
-
-    if (!req)
-        return -EINVAL;
-
-    return sizeof(response);
 }
 
 static int pciem_device_mmap(struct file *file, struct vm_area_struct *vma)
@@ -1107,10 +1067,8 @@ static int pciem_irqfd_wakeup(wait_queue_entry_t *wait, unsigned mode, int sync,
 
     if (flags & EPOLLHUP) {
         guard(spinlock_irqsave)(&irqfds->lock);
-        if (!list_empty(&irqfd->list)) {
-            pr_info("Unregistering IRQ eventfd for vector %u\n", irqfd->vector);
-            pciem_irqfd_shutdown(irqfd);
-        }
+        pr_info("Unregistering IRQ eventfd for vector %u\n", irqfd->vector);
+        pciem_irqfd_shutdown(irqfd);
     }
 
     return 0;
@@ -1174,6 +1132,7 @@ static long pciem_ioctl_set_irqfd(struct pciem_userspace_state *us,
     irqfd->us = us;
     INIT_LIST_HEAD(&irqfd->list);
     INIT_WORK(&irqfd->inject_work, pciem_irqfd_work);
+    INIT_WORK(&irqfd->shutdown_work, pciem_irqfd_shutdown_work);
     init_waitqueue_func_entry(&irqfd->wait, pciem_irqfd_wakeup);
 
     init_poll_funcptr(&pt_helper.pt, pciem_irqfd_ptable_queue_proc);
