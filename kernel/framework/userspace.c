@@ -900,8 +900,8 @@ static long pciem_ioctl_dma_atomic(struct pciem_userspace_state *us, struct pcie
 
 static long pciem_ioctl_p2p(struct pciem_userspace_state *us, struct pciem_p2p_op_user __user *arg)
 {
+    struct pciem_root_complex *v;
     struct pciem_p2p_op_user op;
-    void *kernel_buf;
     int ret;
 
     ret = pciem_check_registered(us);
@@ -914,33 +914,17 @@ static long pciem_ioctl_p2p(struct pciem_userspace_state *us, struct pciem_p2p_o
     if (op.length == 0)
         return -EINVAL;
 
-    kernel_buf = kmalloc(op.length, GFP_KERNEL);
-    if (!kernel_buf)
-        return -ENOMEM;
-
-    struct pciem_root_complex *v = us_get_rc(us, op.func);
+    v = us_get_rc(us, op.func);
     if (!v)
         return -ENODEV;
 
     if (op.flags & PCIEM_DMA_FLAG_WRITE)
-    {
-        if (copy_from_user(kernel_buf, (void __user *)op.user_addr, op.length))
-        {
-            kfree(kernel_buf);
-            return -EFAULT;
-        }
-
-        ret = pciem_p2p_write(v, op.target_phys_addr, kernel_buf, op.length);
-    }
+        ret = pciem_p2p_write(v, op.target_phys_addr,
+                              (void __user *)op.user_addr, op.length);
     else
-    {
-        ret = pciem_p2p_read(v, op.target_phys_addr, kernel_buf, op.length);
+        ret = pciem_p2p_read(v, op.target_phys_addr,
+                             (void __user *)op.user_addr, op.length);
 
-        if (ret == 0 && copy_to_user((void __user *)op.user_addr, kernel_buf, op.length))
-            ret = -EFAULT;
-    }
-
-    kfree(kernel_buf);
     return ret;
 }
 

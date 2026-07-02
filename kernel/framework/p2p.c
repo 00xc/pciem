@@ -13,6 +13,7 @@
 #include <linux/io.h>
 #include <linux/slab.h>
 #include <linux/string.h>
+#include <sound/core.h>
 
 static int parse_p2p_regions(struct pciem_p2p_manager *mgr,
                               const char *regions_str)
@@ -319,7 +320,7 @@ EXPORT_SYMBOL(pciem_p2p_validate_access);
 
 int pciem_p2p_read(struct pciem_root_complex *v,
                    phys_addr_t phys_addr,
-                   void *dst,
+                   void __user *dst,
                    size_t len)
 {
     struct pciem_p2p_manager *mgr;
@@ -346,7 +347,7 @@ int pciem_p2p_read(struct pciem_root_complex *v,
 
     offset = phys_addr - region->phys_start;
 
-    memcpy_fromio(dst, region->kaddr + offset, len);
+    copy_to_user_fromio(dst, region->kaddr + offset, len);
 
     pr_debug("P2P read: 0x%llx+0x%zx from region '%s'\n",
              phys_addr, len, region->name);
@@ -357,7 +358,7 @@ EXPORT_SYMBOL(pciem_p2p_read);
 
 int pciem_p2p_write(struct pciem_root_complex *v,
                     phys_addr_t phys_addr,
-                    const void *src,
+                    const void __user *src,
                     size_t len)
 {
     struct pciem_p2p_manager *mgr;
@@ -384,7 +385,7 @@ int pciem_p2p_write(struct pciem_root_complex *v,
 
     offset = phys_addr - region->phys_start;
 
-    memcpy_toio(region->kaddr + offset, src, len);
+    copy_from_user_toio(region->kaddr + offset, src, len);
 
     pr_debug("P2P write: 0x%llx+0x%zx to region '%s'\n",
              phys_addr, len, region->name);
