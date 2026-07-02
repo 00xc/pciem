@@ -707,6 +707,7 @@ static long pciem_ioctl_set_config(struct pciem_userspace_state *us, struct pcie
 
 static long pciem_ioctl_register(struct pciem_userspace_state *us)
 {
+    struct pciem_root_complex *fn;
     int ret, fd, f;
 
     ret = pciem_start_registration(us);
@@ -716,35 +717,24 @@ static long pciem_ioctl_register(struct pciem_userspace_state *us)
     pr_info("Registering userspace-defined device on PCI bus (%u PF(s))\n", us->slot.num_funcs);
 
     for (f = 0; f < PCIEM_MAX_FUNCTIONS; f++) {
-        struct pciem_root_complex *v = us->slot.funcs[f];
-        if (v)
-            pciem_build_config_space(v);
+        fn = us->slot.funcs[f];
+        if (fn)
+            pciem_build_config_space(fn);
     }
 
     if (us->slot.num_funcs > 1)
         pciem_set_multifunction(us->slot.funcs[0], us->slot.num_funcs);
 
-    ret = pciem_complete_init(us->slot.funcs[0]);
-    if (ret)
-    {
-        pciem_cancel_registration(us);
-        pr_err("Failed to initialise func 0: %d\n", ret);
-        return ret;
-    }
-
-    for (f = 1; f < PCIEM_MAX_FUNCTIONS; f++) {
-        struct pciem_root_complex *fn = us->slot.funcs[f];
+    for (f = 0; f < PCIEM_MAX_FUNCTIONS; f++) {
+        fn = us->slot.funcs[f];
         if (!fn)
             continue;
 
+        /* Initialize the function. Attach functions 1 and above to function 0 */
         ret = pciem_complete_init(fn);
-        if (ret) {
-            pciem_cancel_registration(us);
-            pr_err("Failed to initialise func %d: %d\n", f, ret);
-            return ret;
-        }
+        if (!ret && f > 0)
+            ret = pciem_attach_function(us->slot.funcs[0], fn);
 
-        ret = pciem_attach_function(us->slot.funcs[0], fn);
         if (ret) {
             pciem_cancel_registration(us);
             pr_err("Failed to attach func %d: %d\n", f, ret);
