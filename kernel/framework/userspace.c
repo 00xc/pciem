@@ -143,7 +143,7 @@ static int pciem_instance_mmap(struct file *file, struct vm_area_struct *vma)
     struct pciem_bar_info *bar;
     struct pciem_root_complex *v;
     unsigned long size = vma->vm_end - vma->vm_start;
-    unsigned long bar_index = vma->vm_pgoff & (PCI_STD_NUM_BARS - 1);
+    unsigned long bar_index = vma->vm_pgoff & ((1 << 3) - 1);
     unsigned long func_index = vma->vm_pgoff >> 3;
 
     if (!us)
