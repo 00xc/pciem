@@ -39,7 +39,7 @@ void smptrace_emulate_read(struct smptrace_ctx *ctx, struct smptrace_map *map,
  * to be supported by smptrace */
 
 int smptrace_arch_activate(struct smptrace_ctx *ctx);
-int smptrace_arch_poison_pte(struct smptrace_ctx *ctx, struct smptrace_map *map);
-void smptrace_arch_restore_pte(struct smptrace_ctx *ctx, struct smptrace_map *map);
+int smptrace_arch_poison_pte(struct smptrace_map *map);
+void smptrace_arch_restore_pte(struct smptrace_map *map);
 
 #endif

@@ -140,7 +140,7 @@ int smptrace_exit_ioremap(struct kretprobe_instance *ri, struct pt_regs *regs)
 	pr_info("poisoning VA=0x%lx:%lx (PA=0x%llx:%lx)",
 	        va, args->len, (unsigned long long)ctx->pa, ctx->len);
 
-	if (smptrace_arch_poison_pte(ctx, map)) {
+	if (smptrace_arch_poison_pte(map)) {
 		kfree(map);
 
 		regs_set_return_value(regs, 0);
@@ -180,7 +180,7 @@ int smptrace_enter_iounmap(struct kprobe *kp, struct pt_regs *regs)
 
 	pr_info("restoring VA=0x%lx (PA=0x%llx)", found->va,
 	        (unsigned long long)found->pa);
-	smptrace_arch_restore_pte(ctx, found);
+	smptrace_arch_restore_pte(found);
 	kfree(found);
 	return 0;
 }
@@ -260,7 +260,7 @@ static void smptrace_deactivate(struct smptrace_ctx *ctx)
 		list_del(&map->list);
 		spin_unlock_irqrestore(&ctx->lock, flags);
 
-		smptrace_arch_restore_pte(ctx, map);
+		smptrace_arch_restore_pte(map);
 		kfree(map);
 
 		spin_lock_irqsave(&ctx->lock, flags);

@@ -104,7 +104,7 @@ static unsigned long arm64_level2size(unsigned int level)
  * This also overcomes the limitation of certain unexported functions (That
  * would probably make this much more cleaner...) erroring out on modpost.
  */
-int smptrace_arch_poison_pte(struct smptrace_ctx *ctx, struct smptrace_map *map)
+int smptrace_arch_poison_pte(struct smptrace_map *map)
 {
 	unsigned long va = map->va;
 	int64_t remain = map->len;
@@ -167,7 +167,7 @@ fail:
 /*
  * Restore the PTEs corresponding to the given VA range.
  */
-void smptrace_arch_restore_pte(struct smptrace_ctx *ctx, struct smptrace_map *map)
+void smptrace_arch_restore_pte(struct smptrace_map *map)
 {
 	unsigned long va = map->va;
 	int64_t remain = map->len;

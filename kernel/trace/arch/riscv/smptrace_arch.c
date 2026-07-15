@@ -102,7 +102,7 @@ static unsigned long riscv_level2size(unsigned int level)
 	}
 }
 
-int smptrace_arch_poison_pte(struct smptrace_ctx *ctx, struct smptrace_map *map)
+int smptrace_arch_poison_pte(struct smptrace_map *map)
 {
 	unsigned long satp = csr_read(CSR_SATP);
 	unsigned long va = map->va;
@@ -163,7 +163,7 @@ fail:
 	return ret;
 }
 
-void smptrace_arch_restore_pte(struct smptrace_ctx *ctx, struct smptrace_map *map)
+void smptrace_arch_restore_pte(struct smptrace_map *map)
 {
 	unsigned long satp = csr_read(CSR_SATP);
 	unsigned long va = map->va;
