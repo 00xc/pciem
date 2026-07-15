@@ -247,14 +247,12 @@ static void smptrace_deactivate(struct smptrace_ctx *ctx)
 	struct smptrace_map *map, *tmp;
 	unsigned long flags;
 
-	/* First, stop hooks on ioremap and iounmap so everyone stops updating
-	 * ctx->traced_va */
+	/* First, stop hooks on ioremap and iounmap so everyone stops adding
+	 * and removing poisoned PTEs */
 	unregister_kretprobe(&ctx->ioremap_krp);
 	unregister_kprobe(&ctx->iounmap_kp);
 
-	/* Stop #PF hook now that we shouldn't be hitting #PF */
-	unregister_kprobe(&ctx->badarea_kp);
-
+	/* Now unpoison PTEs so that we stop hitting #PF */
 	spin_lock_irqsave(&ctx->lock, flags);
 	list_for_each_entry_safe(map, tmp, &ctx->maps, list) {
 		list_del(&map->list);
@@ -266,6 +264,9 @@ static void smptrace_deactivate(struct smptrace_ctx *ctx)
 		spin_lock_irqsave(&ctx->lock, flags);
 	}
 	spin_unlock_irqrestore(&ctx->lock, flags);
+
+	/* Stop #PF hook now that we shouldn't be hitting #PF */
+	unregister_kprobe(&ctx->badarea_kp);
 
 	if (ctx->shadow_va) {
 		iounmap(ctx->shadow_va);
