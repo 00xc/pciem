@@ -462,9 +462,7 @@ static int __enter_riscv_handle_page_fault(struct kprobe *kp,
 		(struct pt_regs *)regs_get_kernel_argument(regs, 0);
 	unsigned long fault_va = fault_regs->badaddr;
 	unsigned long cause    = fault_regs->cause;
-	struct smptrace_map *tmp_map, map_copy = {0};
-	unsigned long flags;
-	bool found = false;
+	struct smptrace_map map = {0};
 	int ret;
 
 	if (cause != EXC_LOAD_PAGE_FAULT && cause != EXC_STORE_PAGE_FAULT)
@@ -473,18 +471,7 @@ static int __enter_riscv_handle_page_fault(struct kprobe *kp,
 	if (user_mode(fault_regs))
 		return 0;
 
-	spin_lock_irqsave(&ctx->lock, flags);
-	list_for_each_entry(tmp_map, &ctx->maps, list) {
-		if (fault_va >= tmp_map->va &&
-		    fault_va <  tmp_map->va + tmp_map->len) {
-			map_copy = *tmp_map;
-			found = true;
-			break;
-		}
-	}
-	spin_unlock_irqrestore(&ctx->lock, flags);
-
-	if (!found)
+	if (!smptrace_find_map_rcu(ctx, fault_va, &map))
 		return 0;
 
 	if (this_cpu_xchg(*ctx->in_pf, true)) {
@@ -492,7 +479,7 @@ static int __enter_riscv_handle_page_fault(struct kprobe *kp,
 		return 0;
 	}
 
-	ret = emulate_riscv_fault(ctx, &map_copy, fault_va, fault_regs);
+	ret = emulate_riscv_fault(ctx, &map, fault_va, fault_regs);
 	this_cpu_write(*ctx->in_pf, false);
 
 	if (!ret) {
