@@ -104,6 +104,7 @@ static unsigned long riscv_level2size(unsigned int level)
 
 int smptrace_arch_poison_pte(struct smptrace_ctx *ctx, struct smptrace_map *map)
 {
+	unsigned long satp = csr_read(CSR_SATP);
 	unsigned long va = map->va;
 	int64_t remain = map->len;
 	struct smptrace_pte *orig, *tmp;
@@ -111,7 +112,7 @@ int smptrace_arch_poison_pte(struct smptrace_ctx *ctx, struct smptrace_map *map)
 
 	while (remain > 0) {
 		unsigned int level;
-		pte_t *ptep = riscv_walk_pte(va, &level, ctx->riscv_kernel_satp);
+		pte_t *ptep = riscv_walk_pte(va, &level, satp);
 
 		if (!ptep) {
 			ret = -ENOENT;
@@ -164,12 +165,13 @@ fail:
 
 void smptrace_arch_restore_pte(struct smptrace_ctx *ctx, struct smptrace_map *map)
 {
+	unsigned long satp = csr_read(CSR_SATP);
 	unsigned long va = map->va;
 	int64_t remain = map->len;
 
 	while (remain > 0) {
 		unsigned int level;
-		pte_t *ptep = riscv_walk_pte(va, &level, ctx->riscv_kernel_satp);
+		pte_t *ptep = riscv_walk_pte(va, &level, satp);
 		struct smptrace_pte *orig;
 		unsigned long step;
 
@@ -503,9 +505,11 @@ static int __enter_riscv_handle_page_fault(struct kprobe *kp,
 
 int smptrace_arch_activate(struct smptrace_ctx *ctx)
 {
+	unsigned long satp;
+	
 	// Maybe we could do w/o SATP but it should point to kernel page tables on this context
-	ctx->riscv_kernel_satp = csr_read(CSR_SATP);
-	if (!ctx->riscv_kernel_satp) {
+	satp = csr_read(CSR_SATP);
+	if (!satp) {
 		pr_err("SATP is zero — MMU not enabled?\n");
 		return -EINVAL;
 	}
